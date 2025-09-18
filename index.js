@@ -191,7 +191,7 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     }
     const all = pages.flatMap(pg => pg.results || []);
     const startOffset = skip % tmdbPerPage;
-    aconst window = all.slice(startOffset, startOffset + maxReturn);
+    const window = all.slice(startOffset, startOffset + maxReturn);
     const imdbIds = await Promise.all(window.map(tv => fetchImdbIdForSeries(tv.id).catch(() => null)));
     return { metas: window.map((tv, i) => metaFromOnAir(tv, imdbIds[i])) };
   }
@@ -585,3 +585,4 @@ builder.defineStreamHandler(async ({ id, config }) => {
 // ---------- serve ----------
 serveHTTP(builder.getInterface(), { port: process.env.PORT || 7000 });
 console.log(`Add-on running at http://localhost:${process.env.PORT || 7000}/manifest.json`);
+
