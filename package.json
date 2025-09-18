@@ -1,7 +1,7 @@
 {
   "name": "tmdb-addon",
   "version": "1.0.0",
-  "description": "Stremio add-on: On-the-air + TMDB recommendations with Season 0",
+  "description": "Stremio add-on: TMDB recommendations with Season 0 + Popular rails",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -13,6 +13,6 @@
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.4.5",
-    "stremio-addon-sdk": "^1.7.6"
+    "stremio-addon-sdk": "1.6.10"
   }
 }
