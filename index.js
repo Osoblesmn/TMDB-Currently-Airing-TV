@@ -12,7 +12,7 @@ if (!TMDB_KEY) {
 const TMDB_IMG_W500 = 'https://image.tmdb.org/t/p/w500';
 const TMDB_IMG_BG   = 'https://image.tmdb.org/t/p/w1280';
 
-// ---------- helpers ----------
+// ---------- tiny helpers ----------
 async function tmdb(path, params = {}) {
   const url = new URL(`https://api.themoviedb.org/3${path}`);
   url.searchParams.set('api_key', TMDB_KEY);
@@ -24,18 +24,32 @@ async function tmdb(path, params = {}) {
 }
 const tmdbImage = (p) => (p ? `${TMDB_IMG_W500}${p}` : undefined);
 
-// --- TMDB lists ---
-async function fetchOnTheAirPage(page) {
-  return tmdb('/tv/on_the_air', { page: String(page) });
+// Stremio Web links (work in browsers & web client)
+const webSearch = (q) => `https://web.stremio.com/#/search?search=${encodeURIComponent(q)}`;
+const webDetail = (kind, id) => `https://web.stremio.com/#/detail/${kind}/${encodeURIComponent(id)}`; // kind: movie|series
+
+// YouTube trailer for ranking our stream row
+async function getTrailerYtId(tmdbType, tmdbId) {
+  const vids = await tmdb(`/${tmdbType}/${tmdbId}/videos`);
+  const list = vids.results || [];
+  const official = list.find(v => v.site === 'YouTube' && v.type === 'Trailer' && v.official);
+  if (official?.key) return official.key;
+  const anyYT = list.find(v => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser'));
+  return anyYT?.key || null;
 }
-async function fetchPopularTvPage(page) {
-  return tmdb('/tv/popular', { page: String(page) });
-}
-async function fetchPopularMoviePage(page) {
-  return tmdb('/movie/popular', { page: String(page) });
+async function findTmdbFromImdb(imdb) {
+  const data = await tmdb(`/find/${imdb}`, { external_source: 'imdb_id' });
+  if (data.movie_results?.[0]) return { tmdbType: 'movie', tmdbId: data.movie_results[0].id };
+  if (data.tv_results?.[0])    return { tmdbType: 'tv',    tmdbId: data.tv_results[0].id };
+  return null;
 }
 
-// --- IDs / mappings ---
+// TMDB lists
+async function fetchOnTheAirPage(page)      { return tmdb('/tv/on_the_air', { page: String(page) }); }
+async function fetchPopularTvPage(page)     { return tmdb('/tv/popular',    { page: String(page) }); }
+async function fetchPopularMoviePage(page)  { return tmdb('/movie/popular', { page: String(page) }); }
+
+// Catalog meta builders
 async function fetchImdbIdForSeries(tmdbTvId) {
   const ext = await tmdb(`/tv/${tmdbTvId}/external_ids`);
   return ext.imdb_id || null;
@@ -77,7 +91,7 @@ function metaFromPopularMovie(movie) {
   };
 }
 
-// --- Recommendations utils (rails/search + season 0) ---
+// Query resolution for the search rails
 async function resolveQueryToTmdb(q) {
   const query = (q || '').trim();
   if (!query) return null;
@@ -106,29 +120,30 @@ async function getRecs({ tmdbType, tmdbId, page = 1 }) {
     : `/tv/${tmdbId}/recommendations`;
   return tmdb(path, { page: String(page) });
 }
-async function findTmdbFromImdb(imdb) {
-  const data = await tmdb(`/find/${imdb}`, { external_source: 'imdb_id' });
-  if (data.movie_results?.[0]) return { tmdbType: 'movie', tmdbId: data.movie_results[0].id };
-  if (data.tv_results?.[0])    return { tmdbType: 'tv',    tmdbId: data.tv_results[0].id };
-  return null;
-}
 
-// ---------- manifest ----------
+// ---------- manifest (with Configure on install page) ----------
 const manifest = {
   id: 'org.example.tmdb.onair',
-  version: '2.0.0',
+  version: '2.1.0',
   name: 'TMDB Recommendations & Popular',
   description:
-    'Discovery-focused add-on for Stremio. Includes optional “On the air” and “Recommendations” rails. ' +
-    'On title pages opened from this add-on, a Recommendations list is available for quick discovery. ' +
-    'Tip: use the Popular rails to browse trending titles and jump between related ones.',
-  // Installer options (user-config)
+    'Discovery-focused add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
+    'Open titles from this add-on to see a Recommendations list for quick discovery. ' +
+    'Use the Popular rails to browse trending titles and jump between related ones.',
+
+  behaviorHints: {
+    configurable: true,          // show ⚙️ Configure next to Install
+    configurationRequired: false // but still allow one-click Install
+  },
+
+  // Options shown on /configure (and in-app gear)
   config: [
-    { key: 'enableOnAir',       type: 'boolean', default: true,  title: 'Enable “On the air” rail (TV)' },
-    { key: 'enableRecsTv',      type: 'boolean', default: true,  title: 'Enable “Recommendations” rail (TV)' },
-    { key: 'enableRecsMovie',   type: 'boolean', default: true,  title: 'Enable “Recommendations” rail (Movies)' },
-    { key: 'enableStreamsRecs', type: 'boolean', default: true,  title: 'Enable “Recommendations” button in Streams' }
+    { key: 'enableOnAir',       type: 'boolean', default: 'checked', title: 'Enable “On the air” rail (TV)' },
+    { key: 'enableRecsTv',      type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (TV)' },
+    { key: 'enableRecsMovie',   type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (Movies)' },
+    { key: 'enableStreamsRecs', type: 'boolean', default: 'checked', title: 'Enable “Recommendations” button in Streams' }
   ],
+
   resources: [
     'catalog',
     // We serve meta for our own IDs (tmdb:*) AND for our synthetic "recs:*" pages
@@ -138,20 +153,15 @@ const manifest = {
   types: ['series', 'movie'],
   // streams: handle IMDb + tmdb + synthetic rec IDs
   idPrefixes: ['tt', 'tmdb', 'recs'],
+
   catalogs: [
-    // On The Air rail (TV) — can be toggled off in config
-    { type: 'series', id: 'tmdb-on-air', name: 'On The Air (TMDB)', extra: [{ name: 'skip', isRequired: false }] },
-
-    // Popular series → opens our tmdb pages (they’ll show a Recommendations list)
-    { type: 'series', id: 'tmdb-popular-series', name: 'Popular series recommendations', extra: [{ name: 'skip', isRequired: false }] },
-
-    // Popular movies → opens our tmdb pages (they’ll show a Recommendations list)
-    { type: 'movie',  id: 'tmdb-popular-movies', name: 'Popular movies recommendations', extra: [{ name: 'skip', isRequired: false }] },
-
-    // Search-triggered rails (TV & Movies) — can be toggled independently
-    { type: 'movie',  id: 'tmdb-recs-movie',  name: 'TMDB Recommendations', extra: [{ name: 'search', isRequired: true }, { name: 'skip', isRequired: false }] },
-    { type: 'series', id: 'tmdb-recs-series', name: 'TMDB Recommendations', extra: [{ name: 'search', isRequired: true }, { name: 'skip', isRequired: false }] },
-  ],
+    { type: 'series', id: 'tmdb-on-air',         name: 'On The Air (TMDB)',               extra: [{ name: 'skip', isRequired: false }] },
+    { type: 'series', id: 'tmdb-popular-series', name: 'Popular series recommendations',   extra: [{ name: 'skip', isRequired: false }] },
+    { type: 'movie',  id: 'tmdb-popular-movies', name: 'Popular movies recommendations',   extra: [{ name: 'skip', isRequired: false }] },
+    // Search-triggered rails (TV & Movies), toggleable via config
+    { type: 'movie',  id: 'tmdb-recs-movie',     name: 'TMDB Recommendations',             extra: [{ name: 'search', isRequired: true }, { name: 'skip', isRequired: false }] },
+    { type: 'series', id: 'tmdb-recs-series',    name: 'TMDB Recommendations',             extra: [{ name: 'search', isRequired: true }, { name: 'skip', isRequired: false }] }
+  ]
 };
 
 const builder = new addonBuilder(manifest);
@@ -166,12 +176,12 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
   const endIndexExclusive = skip + maxReturn;
   const endPage = Math.ceil(endIndexExclusive / tmdbPerPage);
 
-  // Respect config toggles by returning an empty list (rail then won’t render)
-  if (id === 'tmdb-on-air' && cfg.enableOnAir === false) return { metas: [] };
-  if (id === 'tmdb-recs-series' && cfg.enableRecsTv === false) return { metas: [] };
-  if (id === 'tmdb-recs-movie'  && cfg.enableRecsMovie === false) return { metas: [] };
+  // Respect config toggles
+  if (id === 'tmdb-on-air'      && cfg.enableOnAir       === false) return { metas: [] };
+  if (id === 'tmdb-recs-series' && cfg.enableRecsTv      === false) return { metas: [] };
+  if (id === 'tmdb-recs-movie'  && cfg.enableRecsMovie   === false) return { metas: [] };
 
-  // On The Air (original rail)
+  // On The Air
   if (type === 'series' && id === 'tmdb-on-air') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
@@ -186,7 +196,7 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     return { metas: window.map((tv, i) => metaFromOnAir(tv, imdbIds[i])) };
   }
 
-  // Popular series → open tmdb pages so our meta is used (shows Recommendations list)
+  // Popular series -> open tmdb:tv:* so our meta shows the Recommendations list
   if (type === 'series' && id === 'tmdb-popular-series') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
@@ -200,7 +210,7 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     return { metas: window.map(metaFromOnAirTmdbOnly) };
   }
 
-  // Popular movies → open tmdb pages so our meta is used (shows Recommendations list)
+  // Popular movies -> open tmdb:movie:* so our meta shows the Recommendations list
   if (type === 'movie' && id === 'tmdb-popular-movies') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
@@ -214,14 +224,10 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     return { metas: window.map(metaFromPopularMovie) };
   }
 
-  // Search-triggered recs rails (TV or Movies)
+  // Search-triggered recommendations rails
   if (id === 'tmdb-recs-movie' || id === 'tmdb-recs-series') {
     const q = (extra?.search || '').trim();
     const PAGE_SIZE = 50;
-
-    // Respect toggles
-    if (id === 'tmdb-recs-series' && cfg.enableRecsTv === false) return { metas: [] };
-    if (id === 'tmdb-recs-movie'  && cfg.enableRecsMovie === false) return { metas: [] };
 
     const resolved = await resolveQueryToTmdb(q);
     if (!resolved) return { metas: [] };
@@ -272,9 +278,11 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
   return { metas: [] };
 });
 
-// ---------- META handler (adds a Recommendations list on our pages; and a dedicated "recs:*" page) ----------
-builder.defineMetaHandler(async ({ type, id }) => {
-  // A) Our normal tmdb:* pages — show a Recommendations list (20 items)
+// ---------- META handler ----------
+// 1) Our normal tmdb:* pages — show a "Recommendations" list (20 items)
+// 2) Dedicated "recs:*" pages for "See more recommendations for this"
+builder.defineMetaHandler(async ({ id }) => {
+  // A) tmdb:* page
   const tm = id.match(/^tmdb:(movie|tv):(\d+)$/i);
   if (tm) {
     const tmdbType = tm[1] === 'movie' ? 'movie' : 'tv';
@@ -286,7 +294,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
     ]);
 
     const title = (details.title || details.name || '').trim();
-    const imdb = ext?.imdb_id || null;
+    const imdb  = ext?.imdb_id || null;
 
     const meta = {
       id,
@@ -297,24 +305,19 @@ builder.defineMetaHandler(async ({ type, id }) => {
       background: details.backdrop_path ? `${TMDB_IMG_BG}${details.backdrop_path}` : undefined,
       releaseInfo: (details.release_date || details.first_air_date || '').slice(0, 4),
       // Helpful chip to jump to Cinemeta if desired
-      links: imdb
-        ? [{
-            name: tmdbType === 'movie' ? 'Open standard movie page' : 'Open standard series page',
-            url: tmdbType === 'movie'
-              ? `stremio://detail/movie/${imdb}`
-              : `stremio://detail/series/${imdb}`
-          }]
-        : []
+      links: imdb ? [{
+        name: tmdbType === 'movie' ? 'Open standard movie page' : 'Open standard series page',
+        url: tmdbType === 'movie' ? `stremio://detail/movie/${imdb}` : `stremio://detail/series/${imdb}`
+      }] : []
     };
 
-    // Label and fill the Recommendations list (season 0)
+    // Label and populate the Recommendations list (20 items)
     meta.seasons = [{ season: 0, name: 'Recommendations' }];
 
     const recs = await getRecs({ tmdbType, tmdbId, page: 1 });
     const first20 = (recs.results || []).slice(0, 20);
 
     meta.videos = await Promise.all(first20.map(async (item, i) => {
-      // Encode target (for nav): prefer IMDb if available
       let imdbId = null;
       try { imdbId = (await tmdb(`/${tmdbType}/${item.id}/external_ids`)).imdb_id || null; } catch {}
       const epTitle = (item.title || item.name || '').trim() || `Recommendation ${i + 1}`;
@@ -326,7 +329,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
       return {
         season: 0,
         episode: i + 1,
-        id: `recs:${kind}:${target}`, // synthetic item we handle in stream handler below
+        id: `recs:${kind}:${target}`,
         title: epYear ? `${epTitle} (${epYear})` : epTitle,
         overview: epDesc,
         thumbnail: tmdbImage(item.poster_path)
@@ -336,23 +339,21 @@ builder.defineMetaHandler(async ({ type, id }) => {
     return { meta };
   }
 
-  // B) Dedicated "See more recommendations" page: recs:(movie|series):(tt:tt123 | tmdb-456)
+  // B) recs:* page (for "See more recommendations for this")
   const rm = id.match(/^recs:(movie|series):(tt:tt\d+|tmdb-\d+)$/i);
   if (rm) {
-    const isMovie = rm[1].toLowerCase() === 'movie';
-    const token = rm[2]; // tt:tt123 or tmdb-456
-    let tmdbType = isMovie ? 'movie' : 'tv';
+    const isMovie = rm[1] === 'movie';
+    let tmdbType  = isMovie ? 'movie' : 'tv';
     let imdb = null, tmdbId = null;
 
-    if (token.startsWith('tt:')) {
-      imdb = token.slice(3);
+    if (rm[2].startsWith('tt:')) {
+      imdb = rm[2].slice(3);
       const found = await findTmdbFromImdb(imdb);
       if (found) { tmdbType = found.tmdbType; tmdbId = String(found.tmdbId); }
     } else {
-      tmdbId = token.slice(5);
+      tmdbId = rm[2].slice(5);
     }
 
-    // Fetch base title details
     let baseTitle = '';
     if (tmdbId) {
       try {
@@ -370,18 +371,13 @@ builder.defineMetaHandler(async ({ type, id }) => {
       type: isMovie ? 'movie' : 'series',
       name: baseTitle ? `More recommendations for: ${baseTitle}` : 'More recommendations',
       description: `Additional related ${isMovie ? 'movies' : 'shows'} based on TMDB.`,
-      poster: undefined,
-      releaseInfo: '',
       seasons: [{ season: 0, name: 'Recommendations' }],
-      links: imdb
-        ? [{
-            name: isMovie ? 'Open standard movie page' : 'Open standard series page',
-            url: isMovie ? `stremio://detail/movie/${imdb}` : `stremio://detail/series/${imdb}`
-          }]
-        : []
+      links: imdb ? [{
+        name: isMovie ? 'Open standard movie page' : 'Open standard series page',
+        url: isMovie ? `stremio://detail/movie/${imdb}` : `stremio://detail/series/${imdb}`
+      }] : []
     };
 
-    // Fill with 20 recs (page 1)
     if (tmdbId) {
       const recs = await getRecs({ tmdbType, tmdbId, page: 1 });
       const first20 = (recs.results || []).slice(0, 20);
@@ -405,13 +401,12 @@ builder.defineMetaHandler(async ({ type, id }) => {
         };
       }));
     } else {
-      meta.videos = []; // nothing else we can do
+      meta.videos = [];
     }
 
     return { meta };
   }
 
-  // Fallback
   return { meta: {} };
 });
 
@@ -419,121 +414,13 @@ builder.defineMetaHandler(async ({ type, id }) => {
 builder.defineStreamHandler(async ({ id, config }) => {
   const cfg = config || {};
 
-  // A) Synthetic recommendation items → two buttons:
-  //    1) Open details page;  2) See more recommendations for this (opens our recs:* page)
-  // Series: recs:series:(tt:tt123 | tmdb-456)
-  const rs = id.match(/^recs:series:(tt:tt\d+|tmdb-\d+)$/i);
-  if (rs) {
-    let imdb = null, tmdbId = null;
-    if (rs[1].startsWith('tt:')) imdb = rs[1].slice(3);
-    else tmdbId = rs[1].slice(5);
+  // helper for the in-app playable row (with optional trailer to rank higher)
+  const makeRecRow = (label, searchQuery, ytId) => ({
+    ...(ytId ? { ytId } : {}),
+    name: label,
+    description: 'Open Stremio Search to view related titles.',
+    externalUrl: `stremio://search?search=${encodeURIComponent(searchQuery)}`
+  });
 
-    if (!imdb && tmdbId) {
-      try { imdb = (await tmdb(`/tv/${tmdbId}/external_ids`)).imdb_id || null; } catch {}
-    }
-
-    const streams = [];
-
-    // (1) Open details
-    if (imdb) {
-      streams.push({
-        name: 'Open series details',
-        description: 'Go to the series page',
-        externalUrl: `stremio://detail/series/${imdb}`
-      });
-    } else {
-      let title = '';
-      try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
-      streams.push({
-        name: title ? `Open: ${title}` : 'Open series details',
-        description: 'Go to the series page (via search)',
-        externalUrl: `stremio://search?search=${encodeURIComponent(title || 'recommendations')}`
-      });
-    }
-
-    // (2) See more recommendations for this → open our dedicated meta page
-    const moreId = imdb ? `recs:series:tt:${imdb}` : `recs:series:tmdb-${tmdbId}`;
-    streams.push({
-      name: 'See more recommendations for this',
-      description: 'Open more related shows',
-      externalUrl: `stremio://detail/series/${moreId}`
-    });
-
-    return { streams };
-  }
-
-  // Movies: recs:movie:(tt:tt123 | tmdb-456)
-  const rm = id.match(/^recs:movie:(tt:tt\d+|tmdb-\d+)$/i);
-  if (rm) {
-    let imdb = null, tmdbId = null;
-    if (rm[1].startsWith('tt:')) imdb = rm[1].slice(3);
-    else tmdbId = rm[1].slice(5);
-
-    if (!imdb && tmdbId) {
-      try { imdb = (await tmdb(`/movie/${tmdbId}/external_ids`)).imdb_id || null; } catch {}
-    }
-
-    const streams = [];
-
-    // (1) Open details
-    if (imdb) {
-      streams.push({
-        name: 'Open movie details',
-        description: 'Go to the movie page',
-        externalUrl: `stremio://detail/movie/${imdb}`
-      });
-    } else {
-      let title = '';
-      try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
-      streams.push({
-        name: title ? `Open: ${title}` : 'Open movie details',
-        description: 'Go to the movie page (via search)',
-        externalUrl: `stremio://search?search=${encodeURIComponent(title || 'recommendations')}`
-      });
-    }
-
-    // (2) See more recommendations for this → open our dedicated meta page
-    const moreId = imdb ? `recs:movie:tt:${imdb}` : `recs:movie:tmdb-${tmdbId}`;
-    streams.push({
-      name: 'See more recommendations for this',
-      description: 'Open more related movies',
-      externalUrl: `stremio://detail/movie/${moreId}`
-    });
-
-    return { streams };
-  }
-
-  // B) Normal IMDb ids (movie or TV episode) → one “TMDB Recommendations” row in Streams (configurable)
-  const imdbMatch = id.match(/^(tt\d+)(?::\d+:\d+)?$/i);
-  if (imdbMatch) {
-    if (cfg.enableStreamsRecs === false) return { streams: [] };
-    const imdb = imdbMatch[1];
-    return { streams: [{
-      name: 'TMDB Recommendations',
-      description: 'Open Stremio Search to view recommendations.',
-      externalUrl: `stremio://search?search=${encodeURIComponent(imdb)}`
-    }]};
-  }
-
-  // C) tmdb fallback ids (if clicked directly)
-  const tmdbMatch = id.match(/^tmdb:(movie|tv):(\d+)(?::\d+:\d+)?$/i);
-  if (tmdbMatch) {
-    if (cfg.enableStreamsRecs === false) return { streams: [] };
-    const tmdbType = tmdbMatch[1] === 'movie' ? 'movie' : 'tv';
-    const tmdbId = tmdbMatch[2];
-    let imdb = null, title = '';
-    try { imdb = (await tmdb(`/${tmdbType}/${tmdbId}/external_ids`)).imdb_id || null; } catch {}
-    try { const d = await tmdb(`/${tmdbType}/${tmdbId}`); title = (d.title || d.name || '').trim(); } catch {}
-    return { streams: [{
-      name: 'TMDB Recommendations',
-      description: 'Open Stremio Search to view recommendations.',
-      externalUrl: `stremio://search?search=${encodeURIComponent(imdb || title || 'recommendations')}`
-    }]};
-  }
-
-  return { streams: [] };
-});
-
-// ---------- serve ----------
-serveHTTP(builder.getInterface(), { port: process.env.PORT || 7000 });
-console.log(`Add-on running at http://localhost:${process.env.PORT || 7000}/manifest.json`);
+  // A) Synthetic recommendation items → show both details + "See more", with browser variants
+  // Series: recs:series:(t
