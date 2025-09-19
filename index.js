@@ -333,16 +333,16 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     if (!imdb && tmdbId) imdb = await imdbForTv(tmdbId);
 
     const streams = [];
-    if (imdb) { streams.push(appRow('Open details', `stremio://detail/series/${imdb}`)); streams.push(webRow('Open details', webDetail('series', imdb))); }
+    if (imdb) { streams.push(appRow('Open details', `stremio:///detail/series/${imdb}`)); streams.push(webRow('Open details', webDetail('series', imdb))); }
     else {
       let title = ''; try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
       const q = title || 'recommendations';
-      streams.push(appRow('Open details (via search)', `stremio://search?search=${encodeURIComponent(q)}`));
+      streams.push(appRow('Open details (via search)', `stremio:///search?search=${encodeURIComponent(q)}`));
       streams.push(webRow('Open details (via search)', webSearch(q)));
     }
     if (tmdbId) {
       const tmdbSeriesId = `tmdb:tv:${tmdbId}`;
-      streams.push(appRow('See more recs', `stremio://detail/series/${tmdbSeriesId}`));
+      streams.push(appRow('See more recs', `stremio:///detail/series/${tmdbSeriesId}`));
       streams.push(webRow('See more recs', webDetail('series', tmdbSeriesId)));
     }
     return { streams };
@@ -357,16 +357,16 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     if (!imdb && tmdbId) imdb = await imdbForMovie(tmdbId);
 
     const streams = [];
-    if (imdb) { streams.push(appRow('Open details', `stremio://detail/movie/${imdb}`)); streams.push(webRow('Open details', webDetail('movie', imdb))); }
+    if (imdb) { streams.push(appRow('Open details', `stremio:///detail/movie/${imdb}`)); streams.push(webRow('Open details', webDetail('movie', imdb))); }
     else {
       let title = ''; try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
       const q = title || 'recommendations';
-      streams.push(appRow('Open details (via search)', `stremio://search?search=${encodeURIComponent(q)}`));
+      streams.push(appRow('Open details (via search)', `stremio:///search?search=${encodeURIComponent(q)}`));
       streams.push(webRow('Open details (via search)', webSearch(q)));
     }
     if (tmdbId) {
       const tmdbMovieId = `tmdb:movie:${tmdbId}`;
-      streams.push(appRow('See more recs', `stremio://detail/movie/${tmdbMovieId}`));
+      streams.push(appRow('See more recs', `stremio:///detail/movie/${tmdbMovieId}`));
       streams.push(webRow('See more recs', webDetail('movie', tmdbMovieId)));
     }
     return { streams };
@@ -378,7 +378,7 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const imdb = imdbMatch[1];
     return { streams: [
-      appRow('TMDB recs', `stremio://search?search=${encodeURIComponent(imdb)}`),
+      appRow('TMDB recs', `stremio:///search?search=${encodeURIComponent(imdb)}`),
       webRow('TMDB recs', webSearch(imdb))
     ] };
   }
@@ -394,7 +394,7 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     try { const d = await tmdb(`/${tmdbType}/${tmdbId}`); title = (d.title || d.name || '').trim(); } catch {}
     const query = imdb || title || 'recommendations';
     return { streams: [
-      appRow('TMDB recs', `stremio://search?search=${encodeURIComponent(query)}`),
+      appRow('TMDB recs', `stremio:///search?search=${encodeURIComponent(query)}`),
       webRow('TMDB recs', webSearch(query))
     ] };
   }
@@ -586,5 +586,6 @@ app.listen(PORT, () => {
   console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
   console.log(`Configure: http://localhost:${PORT}/configure`);
 });
+
 
 
