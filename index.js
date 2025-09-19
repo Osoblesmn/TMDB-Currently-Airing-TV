@@ -1,8 +1,11 @@
-// index.js (ESM)
+// index.js (ESM) — Stremio add-on + custom landing page
 import 'dotenv/config';
+import express from 'express';
 import sdk from 'stremio-addon-sdk';
-const { addonBuilder, serveHTTP } = sdk;
+const { addonBuilder } = sdk;
 
+// ---------- config ----------
+const PORT = process.env.PORT || 7000;
 const TMDB_KEY = process.env.TMDB_API_KEY;
 if (!TMDB_KEY) {
   console.error('Missing TMDB_API_KEY in environment');
@@ -12,26 +15,45 @@ if (!TMDB_KEY) {
 const TMDB_IMG_W500 = 'https://image.tmdb.org/t/p/w500';
 const TMDB_IMG_BG   = 'https://image.tmdb.org/t/p/w1280';
 
-// ---------- utils ----------
+const DEFAULTS = {
+  enableOnAir: true,
+  enableRecsTv: true,
+  enableRecsMovie: true,
+  enableStreamsRecs: true,
+  compatPopularImdb: false
+};
+
+// ---------- tiny utils ----------
 async function tmdb(path, params = {}) {
   const url = new URL(`https://api.themoviedb.org/3${path}`);
   url.searchParams.set('api_key', TMDB_KEY);
   url.searchParams.set('language', 'en-GB');
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
   return res.json();
 }
 const img = (p) => (p ? `${TMDB_IMG_W500}${p}` : undefined);
-
-// Stremio Web links (same-tab hash routes)
 const webSearch = (q) => `https://web.stremio.com/#/search?search=${encodeURIComponent(q)}`;
 const webDetail = (kind, id) => `https://web.stremio.com/#/detail/${kind}/${encodeURIComponent(id)}`;
 
-// IDs
-async function imdbForTv(tmdbId)    { try { return (await tmdb(`/tv/${tmdbId}/external_ids`)).imdb_id || null; } catch { return null; } }
-async function imdbForMovie(tmdbId) { try { return (await tmdb(`/movie/${tmdbId}/external_ids`)).imdb_id || null; } catch { return null; } }
-async function tmdbFromImdb(imdb)   {
+// Read persistent config from the **installed URL** query parameters.
+// Stremio keeps the exact URL (including ?foo=1) for all subsequent calls.
+function cfgFromQuery(q = {}) {
+  const bool = (v, def) => (v === '1' || v === 'true' || v === true) ? true : (v === '0' || v === 'false') ? false : def;
+  return {
+    enableOnAir:       bool(q.onair,   DEFAULTS.enableOnAir),
+    enableRecsTv:      bool(q.recsTv,  DEFAULTS.enableRecsTv),
+    enableRecsMovie:   bool(q.recsMov, DEFAULTS.enableRecsMovie),
+    enableStreamsRecs: bool(q.streams, DEFAULTS.enableStreamsRecs),
+    compatPopularImdb: bool(q.compat,  DEFAULTS.compatPopularImdb)
+  };
+}
+
+// ---------- TMDB helpers ----------
+async function imdbForTv(id)    { try { return (await tmdb(`/tv/${id}/external_ids`)).imdb_id || null; } catch { return null; } }
+async function imdbForMovie(id) { try { return (await tmdb(`/movie/${id}/external_ids`)).imdb_id || null; } catch { return null; } }
+async function tmdbFromImdb(imdb) {
   try {
     const r = await tmdb(`/find/${imdb}`, { external_source: 'imdb_id' });
     if (r.movie_results?.[0]) return { tmdbType: 'movie', tmdbId: r.movie_results[0].id };
@@ -40,12 +62,10 @@ async function tmdbFromImdb(imdb)   {
   return null;
 }
 
-// TMDB lists
-const getOnAir   = (page) => tmdb('/tv/on_the_air', { page: String(page) });
-const getPopTv   = (page) => tmdb('/tv/popular',    { page: String(page) });
-const getPopMov  = (page) => tmdb('/movie/popular', { page: String(page) });
+const getOnAir   = (p) => tmdb('/tv/on_the_air', { page: String(p) });
+const getPopTv   = (p) => tmdb('/tv/popular',    { page: String(p) });
+const getPopMov  = (p) => tmdb('/movie/popular', { page: String(p) });
 
-// Search / recs
 async function resolveQueryToTmdb(q) {
   const query = (q || '').trim();
   if (!query) return null;
@@ -68,14 +88,14 @@ async function getRecs({ tmdbType, tmdbId, page = 1 }) {
   return tmdb(path, { page: String(page) });
 }
 
-// ---------- manifest ----------
+// ---------- Stremio manifest ----------
 const manifest = {
   id: 'org.example.tmdb.onair',
-  version: '2.3.4',
-  name: 'TMDB Recs', // shorter name (mobile-friendly)
+  version: '2.5.0',
+  name: 'TMDB Recs',
   description:
-    'Discovery add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
-    'Open titles to see a Recommendations list. Popular rails browse trending titles and jump to related ones.',
+    'Discovery add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies).\n' +
+    'Open any title from this add-on to see a Season-0 list with 20 recommendations.',
 
   behaviorHints: { configurable: true, configurationRequired: false },
   config: [
@@ -105,11 +125,13 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// ---------- CATALOG ----------
+// ---------- CATALOG handler ----------
 builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
-  const cfg = config || {};
-  const tmdbPerPage = 20;
-  const maxReturn = 100;
+  // Merge persisted URL config (installed URL query) as defaults:
+  const persisted = cfgFromQuery(extra || {}); // when installed with ?onair=1..., Stremio appends them to each call
+  const cfg = { ...persisted, ...(config || {}) };
+
+  const tmdbPerPage = 20, maxReturn = 100;
   const skip = Number(extra?.skip || 0);
   const startPage = Math.floor(skip / tmdbPerPage) + 1;
   const endIndexExclusive = skip + maxReturn;
@@ -259,24 +281,23 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
   return { metas: [] };
 });
 
-// ---------- META ----------
-builder.defineMetaHandler(async ({ type, id }) => {
-  // tmdb pages -> enhanced detail with Season 0 recs (20)
-  const m = id.match(/^tmdb:(movie|tv):(\d+)$/i);
-  if (m) {
-    const tmdbType = m[1] === 'movie' ? 'movie' : 'tv';
-    const tmdbId = m[2];
+// ---------- META handler ----------
+builder.defineMetaHandler(async ({ type, id, extra }) => {
+  // Use persisted config from query if present (kept harmless here)
+  const tm = id.match(/^tmdb:(movie|tv):(\d+)$/i);
+  if (tm) {
+    const tmdbType = tm[1] === 'movie' ? 'movie' : 'tv';
+    const tmdbId = tm[2];
 
     const details = await tmdb(`/${tmdbType}/${tmdbId}`);
     const title = (details.title || details.name || '').trim();
-    const poster = img(details.poster_path) || img(details.backdrop_path) || undefined;
 
     const meta = {
       id,
-      type, // ensure it matches the request ('series' or 'movie')
+      type, // 'series' or 'movie' from request
       name: title || id,
       description: details.overview || '',
-      poster,
+      poster: img(details.poster_path),
       background: details.backdrop_path ? `${TMDB_IMG_BG}${details.backdrop_path}` : undefined,
       releaseInfo: (details.release_date || details.first_air_date || '').slice(0, 4),
       seasons: [{ season: 0, name: 'Recommendations' }]
@@ -305,7 +326,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
     return { meta };
   }
 
-  // Minimal synthetic page (kept for backwards compatibility)
+  // Minimal synthetic page (kept for fallback)
   const r = id.match(/^recs:(movie|series):(tt:tt\d+|tmdb-\d+)$/i);
   if (r) {
     const isMovie = r[1] === 'movie';
@@ -322,117 +343,93 @@ builder.defineMetaHandler(async ({ type, id }) => {
   return { meta: {} };
 });
 
-// ---------- STREAMS ----------
-builder.defineStreamHandler(async ({ id, config }) => {
-  const cfg = config || {};
-  const makeAppRow = (label, searchQuery) => ({
-    name: `APP • ${label}`,
-    description: 'Open in the Stremio app',
-    externalUrl: `stremio://search?search=${encodeURIComponent(searchQuery)}`
-  });
-  const makeWebRow = (label, url) => ({
-    name: `WEB • ${label}`,
-    description: 'Open in Stremio Web',
-    externalUrl: url
-  });
+// ---------- STREAM handler ----------
+builder.defineStreamHandler(async ({ id, config, extra }) => {
+  const persisted = cfgFromQuery(extra || {});
+  const cfg = { ...persisted, ...(config || {}) };
 
-  // Synthetic rec "episodes" (series)
+  const appRow = (label, url) => ({ name: `APP • ${label}`, description: 'Open in Stremio app', externalUrl: url });
+  const webRow = (label, url) => ({ name: `WEB • ${label}`, description: 'Open in Stremio Web', externalUrl: url });
+
+  // Series synthetic recs
   const rs = id.match(/^recs:series:(tt:tt\d+|tmdb-\d+)$/i);
   if (rs) {
     let imdb = rs[1].startsWith('tt:') ? rs[1].slice(3) : null;
     let tmdbId = rs[1].startsWith('tmdb-') ? rs[1].slice(5) : null;
-
-    if (!tmdbId && imdb) {
-      const found = await tmdbFromImdb(imdb);
-      if (found?.tmdbType === 'tv') tmdbId = String(found.tmdbId);
-    }
+    if (!tmdbId && imdb) { const f = await tmdbFromImdb(imdb); if (f?.tmdbType === 'tv') tmdbId = String(f.tmdbId); }
     if (!imdb && tmdbId) imdb = await imdbForTv(tmdbId);
 
     const streams = [];
-
-    // Open normal details
     if (imdb) {
-      streams.push({ name: 'APP • Open details', description: 'Go to series page', externalUrl: `stremio://detail/series/${imdb}` });
-      streams.push(makeWebRow('Open details', webDetail('series', imdb)));
+      streams.push(appRow('Open details', `stremio://detail/series/${imdb}`));
+      streams.push(webRow('Open details', webDetail('series', imdb)));
     } else {
       let title = ''; try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
       const q = title || 'recommendations';
-      streams.push(makeAppRow('Open details (via search)', q));
-      streams.push(makeWebRow('Open details (via search)', webSearch(q)));
+      streams.push(appRow('Open details (via search)', `stremio://search?search=${encodeURIComponent(q)}`));
+      streams.push(webRow('Open details (via search)', webSearch(q)));
     }
-
-    // See more recommendations → jump to proper TMDB detail (RAW id for APP, encoded for WEB)
     if (tmdbId) {
-      const tmdbSeriesIdRaw   = `tmdb:tv:${tmdbId}`;
-      const tmdbSeriesIdWeb   = tmdbSeriesIdRaw; // webDetail will encode
-      streams.push({ name: 'APP • See more recs', description: 'Open recs page for this series', externalUrl: `stremio://detail/series/${tmdbSeriesIdRaw}` });
-      streams.push(makeWebRow('See more recs', webDetail('series', tmdbSeriesIdWeb)));
+      const tmdbSeriesId = `tmdb:tv:${tmdbId}`;
+      streams.push(appRow('See more recs', `stremio://detail/series/${tmdbSeriesId}`));
+      streams.push(webRow('See more recs', webDetail('series', tmdbSeriesId)));
     }
-
     return { streams };
   }
 
-  // Synthetic rec "episodes" (movies)
+  // Movie synthetic recs
   const rm = id.match(/^recs:movie:(tt:tt\d+|tmdb-\d+)$/i);
   if (rm) {
     let imdb = rm[1].startsWith('tt:') ? rm[1].slice(3) : null;
     let tmdbId = rm[1].startsWith('tmdb-') ? rm[1].slice(5) : null;
-
-    if (!tmdbId && imdb) {
-      const found = await tmdbFromImdb(imdb);
-      if (found?.tmdbType === 'movie') tmdbId = String(found.tmdbId);
-    }
+    if (!tmdbId && imdb) { const f = await tmdbFromImdb(imdb); if (f?.tmdbType === 'movie') tmdbId = String(f.tmdbId); }
     if (!imdb && tmdbId) imdb = await imdbForMovie(tmdbId);
 
     const streams = [];
-
     if (imdb) {
-      streams.push({ name: 'APP • Open details', description: 'Go to movie page', externalUrl: `stremio://detail/movie/${imdb}` });
-      streams.push(makeWebRow('Open details', webDetail('movie', imdb)));
+      streams.push(appRow('Open details', `stremio://detail/movie/${imdb}`));
+      streams.push(webRow('Open details', webDetail('movie', imdb)));
     } else {
       let title = ''; try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
       const q = title || 'recommendations';
-      streams.push(makeAppRow('Open details (via search)', q));
-      streams.push(makeWebRow('Open details (via search)', webSearch(q)));
+      streams.push(appRow('Open details (via search)', `stremio://search?search=${encodeURIComponent(q)}`));
+      streams.push(webRow('Open details (via search)', webSearch(q)));
     }
-
     if (tmdbId) {
-      const tmdbMovieIdRaw = `tmdb:movie:${tmdbId}`;
-      const tmdbMovieIdWeb = tmdbMovieIdRaw;
-      streams.push({ name: 'APP • See more recs', description: 'Open recs page for this movie', externalUrl: `stremio://detail/movie/${tmdbMovieIdRaw}` });
-      streams.push(makeWebRow('See more recs', webDetail('movie', tmdbMovieIdWeb)));
+      const tmdbMovieId = `tmdb:movie:${tmdbId}`;
+      streams.push(appRow('See more recs', `stremio://detail/movie/${tmdbMovieId}`));
+      streams.push(webRow('See more recs', webDetail('movie', tmdbMovieId)));
     }
-
     return { streams };
   }
 
-  // IMDb items (normal pages) — add Recommendations rows (APP + WEB)
+  // Normal IMDb items
   const imdbMatch = id.match(/^(tt\d+)(?::\d+:\d+)?$/i);
   if (imdbMatch) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const imdb = imdbMatch[1];
     return {
       streams: [
-        { name: 'APP • TMDB recs', description: 'Open related titles', externalUrl: `stremio://search?search=${encodeURIComponent(imdb)}` },
-        makeWebRow('TMDB recs', webSearch(imdb))
+        appRow('TMDB recs', `stremio://search?search=${encodeURIComponent(imdb)}`),
+        webRow('TMDB recs', webSearch(imdb))
       ]
     };
   }
 
-  // tmdb fallback ids — also give both rows
-  const tmdbMatch = id.match(/^tmdb:(movie|tv):(\d+)(?::\d+:\d+)?$/i);
-  if (tmdbMatch) {
+  // tmdb fallback ids
+  const t = id.match(/^tmdb:(movie|tv):(\d+)(?::\d+:\d+)?$/i);
+  if (t) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
-    const tmdbType = tmdbMatch[1] === 'movie' ? 'movie' : 'tv';
-    const tmdbId   = tmdbMatch[2];
+    const tmdbType = t[1] === 'movie' ? 'movie' : 'tv';
+    const tmdbId   = t[2];
     let imdb = null, title = '';
     try { imdb = tmdbType === 'movie' ? await imdbForMovie(tmdbId) : await imdbForTv(tmdbId); } catch {}
     try { const d = await tmdb(`/${tmdbType}/${tmdbId}`); title = (d.title || d.name || '').trim(); } catch {}
     const query = imdb || title || 'recommendations';
     return {
       streams: [
-        { name: 'APP • TMDB recs', description: 'Open related titles', externalUrl: `stremio://search?search=${encodeURIComponent(query)}` },
-        makeWebRow('TMDB recs', webSearch(query))
+        appRow('TMDB recs', `stremio://search?search=${encodeURIComponent(query)}`),
+        webRow('TMDB recs', webSearch(query))
       ]
     };
   }
@@ -440,6 +437,216 @@ builder.defineStreamHandler(async ({ id, config }) => {
   return { streams: [] };
 });
 
-// ---------- serve ----------
-serveHTTP(builder.getInterface(), { port: process.env.PORT || 7000 });
-console.log(`Add-on running at http://localhost:${process.env.PORT || 7000}/manifest.json`);
+// ---------- Express server (custom landing + Stremio endpoints) ----------
+const iface = builder.getInterface();
+const app = express();
+
+// CORS (Stremio clients)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Pretty landing
+app.get('/', (req, res) => res.redirect('/configure'));
+
+app.get('/configure', (req, res) => {
+  const base = `${req.protocol}://${req.get('host')}`;
+  // Build a pre-configured manifest URL using the current toggles in query (or defaults)
+  const q = cfgFromQuery(req.query);
+  const params = new URLSearchParams();
+  if (q.enableOnAir)       params.set('onair',   '1'); else params.set('onair',   '0');
+  if (q.enableRecsTv)      params.set('recsTv',  '1'); else params.set('recsTv',  '0');
+  if (q.enableRecsMovie)   params.set('recsMov', '1'); else params.set('recsMov', '0');
+  if (q.enableStreamsRecs) params.set('streams', '1'); else params.set('streams', '0');
+  if (q.compatPopularImdb) params.set('compat',  '1'); else params.set('compat',  '0');
+
+  const manifestUrl = `${base}/manifest.json?${params.toString()}`;
+  const webInstallHint = `https://web.stremio.com/#/addons/community`; // user pastes manifest URL in “Install via URL”
+
+  // Simple SPA-like tabs (no framework)
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>TMDB Recs — Configure & Install</title>
+<style>
+  :root { --bg:#0f1115; --card:#171923; --muted:#9aa4b2; --text:#e7edf3; --accent:#6aa9ff; --accent2:#8ef; }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .wrap{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
+  .side{background:#11131a;border-right:1px solid #22283a;padding:18px}
+  .logo{font-weight:700;font-size:20px;margin-bottom:10px}
+  .side .muted{color:var(--muted);font-size:12px;margin-bottom:18px}
+  .nav a{display:block;padding:10px 12px;border-radius:10px;color:var(--text);margin:6px 0}
+  .nav a.active, .nav a:hover{background:var(--card)}
+  .main{padding:24px}
+  .card{background:var(--card);border:1px solid #22283a;border-radius:14px;padding:18px;margin-bottom:16px}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .btn{display:inline-block;background:var(--accent);color:#001b3d;padding:10px 14px;border-radius:10px;font-weight:600;border:none;cursor:pointer}
+  .btn.alt{background:#2a2f45;color:#e7edf3}
+  input[type=checkbox]{transform:scale(1.1);margin-right:8px}
+  code, .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace}
+  .small{font-size:13px;color:var(--muted)}
+  .kbd{padding:2px 6px;border:1px solid #334;border-radius:6px;background:#141828}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:980px){ .wrap{grid-template-columns:1fr} .side{border-right:0;border-bottom:1px solid #22283a} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside class="side">
+    <div class="logo">TMDB Recs</div>
+    <div class="muted">Discovery add-on for Stremio</div>
+    <nav class="nav">
+      <a href="#intro" class="active">Intro</a>
+      <a href="#usage">How to use</a>
+      <a href="#config">Configure & Install</a>
+    </nav>
+  </aside>
+  <main class="main">
+    <section id="intro" class="card">
+      <h2>Intro</h2>
+      <p>This add-on adds discovery tools to Stremio:</p>
+      <ul>
+        <li><b>Season 0 — Recommendations:</b> On any movie/series page opened via this add-on, a Season 0 appears with the top 20 TMDB recommendations for that title.</li>
+        <li><b>Popular rails:</b> Browse trending series and movies and jump between related titles quickly.</li>
+        <li><b>Streams tab helpers:</b> Quick actions prefixed <b>APP •</b> (native app deep links) or <b>WEB •</b> (Stremio Web).</li>
+      </ul>
+      <p class="small">Tip: Stremio Web opens <span class="mono">http(s)://</span> links in a new tab by design. Use the <b>APP •</b> actions in the app, or open recommendations via Season 0 on the detail page.</p>
+    </section>
+
+    <section id="usage" class="card">
+      <h2>How to use recommendations</h2>
+      <div class="grid2">
+        <div>
+          <h3>From a rail</h3>
+          <ol>
+            <li>Open a title from <b>Popular</b> or <b>Recommendations</b> rails.</li>
+            <li>Switch to <b>Season 0 (Recommendations)</b>.</li>
+            <li>Select a recommended “episode” to jump to its title page.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>From Streams tab</h3>
+          <ol>
+            <li>Open any movie/series (Cinemeta page).</li>
+            <li>In <b>Streams</b>, pick <b>APP • TMDB recs</b> (native) or <b>WEB • TMDB recs</b>.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="config" class="card">
+      <h2>Configure & Install</h2>
+      <form id="cfgForm" class="row" action="/configure" method="GET">
+        <label><input type="checkbox" name="onair"  ${q.enableOnAir ? 'checked' : ''}> On the air (TV)</label>
+        <label><input type="checkbox" name="recsTv" ${q.enableRecsTv ? 'checked' : ''}> Recs rail (TV)</label>
+        <label><input type="checkbox" name="recsMov" ${q.enableRecsMovie ? 'checked' : ''}> Recs rail (Movies)</label>
+        <label><input type="checkbox" name="streams" ${q.enableStreamsRecs ? 'checked' : ''}> Streams helpers</label>
+        <label><input type="checkbox" name="compat" ${q.compatPopularImdb ? 'checked' : ''}> Popular rails: IMDb compatibility</label>
+        <button class="btn" type="submit">Apply</button>
+      </form>
+
+      <div class="card" style="margin-top:14px">
+        <h3>Install</h3>
+        <div class="row">
+          <button class="btn" id="copyBtn">Copy Manifest URL</button>
+          <a class="btn alt" id="openWeb" href="${webInstallHint}">Open Stremio Web Add-ons</a>
+        </div>
+        <p class="small">Paste the URL below into <b>Add-ons → Community → Install via URL</b>:</p>
+        <pre class="mono" id="manifestUrl" style="white-space:pre-wrap">${manifestUrl}</pre>
+        <p class="small">Native app: open Add-ons → Community → Install via URL and paste the same link.</p>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+  // tabs
+  const links=[...document.querySelectorAll('.nav a')];
+  function activate(hash){ links.forEach(a=>a.classList.toggle('active', a.getAttribute('href')===hash)); }
+  window.addEventListener('hashchange', ()=>activate(location.hash||'#intro'));
+  activate(location.hash||'#intro');
+
+  // form → keep only explicit checkboxes as 1/0 in URL
+  const form = document.getElementById('cfgForm');
+  form.addEventListener('submit', (e)=>{
+    // let server handle redirect with clean params
+  });
+
+  // copy manifest URL
+  document.getElementById('copyBtn').addEventListener('click', async ()=>{
+    const txt = document.getElementById('manifestUrl').textContent.trim();
+    try { await navigator.clipboard.writeText(txt); alert('Manifest URL copied!'); } catch(e){ alert('Copy failed, please select & copy manually.'); }
+  });
+
+  // force same-tab for Stremio Web button (it already is, but ensure no target=_blank)
+  document.getElementById('openWeb').setAttribute('target','_self');
+</script>
+</body>
+</html>`);
+});
+
+// ---------- Stremio HTTP endpoints (GET & POST) ----------
+app.get('/manifest.json', (req, res) => {
+  // Reflect defaults based on query (for nicer first-time Configure defaults)
+  const q = cfgFromQuery(req.query);
+  const m = JSON.parse(JSON.stringify(manifest));
+  // no dynamic change of schema, but we keep behavior via handlers reading query each time
+  res.json(m);
+});
+
+// Stremio sometimes POSTs with JSON payload; handle both GET and POST for resources
+const parseBody = express.json();
+
+function sendJSON(res, obj) { res.type('application/json').send(JSON.stringify(obj)); }
+
+// /catalog/:type/:id.json
+app.get('/catalog/:type/:id.json', (req, res) => {
+  iface.get('catalog', req.params.type, req.params.id, req.query)
+    .then(r => sendJSON(res, r))
+    .catch(e => res.status(500).json({ err: String(e) }));
+});
+app.post('/catalog/:type/:id.json', parseBody, (req, res) => {
+  const extra = Object.assign({}, req.query, req.body || {});
+  iface.get('catalog', req.params.type, req.params.id, extra)
+    .then(r => sendJSON(res, r))
+    .catch(e => res.status(500).json({ err: String(e) }));
+});
+
+// /meta/:type/:id.json
+app.get('/meta/:type/:id.json', (req, res) => {
+  iface.get('meta', req.params.type, req.params.id, req.query)
+    .then(r => sendJSON(res, r))
+    .catch(e => res.status(500).json({ err: String(e) }));
+});
+app.post('/meta/:type/:id.json', parseBody, (req, res) => {
+  const extra = Object.assign({}, req.query, req.body || {});
+  iface.get('meta', req.params.type, req.params.id, extra)
+    .then(r => sendJSON(res, r))
+    .catch(e => res.status(500).json({ err: String(e) }));
+});
+
+// /stream/:type/:id.json
+app.get('/stream/:type/:id.json', (req, res) => {
+  iface.get('stream', req.params.type, req.params.id, req.query)
+    .then(r => sendJSON(res, r))
+    .catch(e => res.status(500).json({ err: String(e) }));
+});
+app.post('/stream/:type/:id.json', parseBody, (req, res) => {
+  const extra = Object.assign({}, req.query, req.body || {});
+  iface.get('stream', req.params.type, req.params.id, extra)
+    .then(r => sendJSON(res, r))
+    .catch(e => res.status(500).json({ err: String(e) }));
+});
+
+// start
+app.listen(PORT, () => {
+  console.log(`TMDB Recs running on http://localhost:${PORT}`);
+  console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
+  console.log(`Configure: http://localhost:${PORT}/configure`);
+});
