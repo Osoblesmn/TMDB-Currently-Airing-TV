@@ -54,8 +54,12 @@ async function fetchImdbIdForSeries(tmdbTvId) {
   const ext = await tmdb(`/tv/${tmdbTvId}/external_ids`);
   return ext.imdb_id || null;
 }
-function metaFromOnAir(tv, imdbId) {
-  const id = imdbId || `tmdb:tv:${tv.id}`;
+async function fetchImdbIdForMovie(tmdbMovieId) {
+  const ext = await tmdb(`/movie/${tmdbMovieId}/external_ids`);
+  return ext.imdb_id || null;
+}
+function metaFromSeriesWithId(tv, idOverride) {
+  const id = idOverride || `tmdb:tv:${tv.id}`;
   return {
     id, type: 'series',
     name: tv.name || tv.original_name,
@@ -66,22 +70,10 @@ function metaFromOnAir(tv, imdbId) {
     year: tv.first_air_date ? Number(tv.first_air_date.slice(0, 4)) : undefined,
   };
 }
-function metaFromOnAirTmdbOnly(tv) {
+function metaFromMovieWithId(movie, idOverride) {
+  const id = idOverride || `tmdb:movie:${movie.id}`;
   return {
-    id: `tmdb:tv:${tv.id}`,
-    type: 'series',
-    name: tv.name || tv.original_name,
-    poster: tmdbImage(tv.poster_path),
-    posterShape: 'poster',
-    description: tv.overview || '',
-    releaseInfo: (tv.first_air_date || '').slice(0, 4),
-    year: tv.first_air_date ? Number(tv.first_air_date.slice(0, 4)) : undefined,
-  };
-}
-function metaFromPopularMovie(movie) {
-  return {
-    id: `tmdb:movie:${movie.id}`,
-    type: 'movie',
+    id, type: 'movie',
     name: movie.title || movie.original_title,
     poster: tmdbImage(movie.poster_path),
     posterShape: 'poster',
@@ -124,7 +116,7 @@ async function getRecs({ tmdbType, tmdbId, page = 1 }) {
 // ---------- manifest (with Configure on install page) ----------
 const manifest = {
   id: 'org.example.tmdb.onair',
-  version: '2.1.1',
+  version: '2.2.0',
   name: 'TMDB Recommendations & Popular',
   description:
     'Discovery-focused add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
@@ -138,10 +130,12 @@ const manifest = {
 
   // Options shown on /configure (and in-app gear)
   config: [
-    { key: 'enableOnAir',       type: 'boolean', default: 'checked', title: 'Enable “On the air” rail (TV)' },
-    { key: 'enableRecsTv',      type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (TV)' },
-    { key: 'enableRecsMovie',   type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (Movies)' },
-    { key: 'enableStreamsRecs', type: 'boolean', default: 'checked', title: 'Enable “Recommendations” button in Streams' }
+    { key: 'enableOnAir',         type: 'boolean', default: 'checked', title: 'Enable “On the air” rail (TV)' },
+    { key: 'enableRecsTv',        type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (TV)' },
+    { key: 'enableRecsMovie',     type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (Movies)' },
+    { key: 'enableStreamsRecs',   type: 'boolean', default: 'checked', title: 'Enable “Recommendations” button in Streams' },
+    // Optional: emit IMDb IDs for Popular rails so they work even if the add-on isn't installed in Web.
+    { key: 'compatPopularImdb',   type: 'boolean', default: '',        title: 'Compatibility mode for Popular rails (use IMDb IDs)' }
   ],
 
   resources: [
@@ -181,7 +175,7 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
   if (id === 'tmdb-recs-series' && cfg.enableRecsTv      === false) return { metas: [] };
   if (id === 'tmdb-recs-movie'  && cfg.enableRecsMovie   === false) return { metas: [] };
 
-  // On The Air
+  // On The Air (TV)
   if (type === 'series' && id === 'tmdb-on-air') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
@@ -193,10 +187,10 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     const startOffset = skip % tmdbPerPage;
     const window = all.slice(startOffset, startOffset + maxReturn);
     const imdbIds = await Promise.all(window.map(tv => fetchImdbIdForSeries(tv.id).catch(() => null)));
-    return { metas: window.map((tv, i) => metaFromOnAir(tv, imdbIds[i])) };
+    return { metas: window.map((tv, i) => metaFromSeriesWithId(tv, imdbIds[i] || `tmdb:tv:${tv.id}`)) };
   }
 
-  // Popular series -> open tmdb:tv:* so our meta shows the Recommendations list
+  // Popular series
   if (type === 'series' && id === 'tmdb-popular-series') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
@@ -207,10 +201,16 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     const all = pages.flatMap(pg => pg.results || []);
     const startOffset = skip % tmdbPerPage;
     const window = all.slice(startOffset, startOffset + maxReturn);
-    return { metas: window.map(metaFromOnAirTmdbOnly) };
+
+    if (cfg.compatPopularImdb) {
+      const imdbIds = await Promise.all(window.map(tv => fetchImdbIdForSeries(tv.id).catch(() => null)));
+      return { metas: window.map((tv, i) => metaFromSeriesWithId(tv, imdbIds[i] || `tmdb:tv:${tv.id}`)) };
+    } else {
+      return { metas: window.map(tv => metaFromSeriesWithId(tv, `tmdb:tv:${tv.id}`)) };
+    }
   }
 
-  // Popular movies -> open tmdb:movie:* so our meta shows the Recommendations list
+  // Popular movies
   if (type === 'movie' && id === 'tmdb-popular-movies') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
@@ -221,7 +221,13 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     const all = pages.flatMap(pg => pg.results || []);
     const startOffset = skip % tmdbPerPage;
     const window = all.slice(startOffset, startOffset + maxReturn);
-    return { metas: window.map(metaFromPopularMovie) };
+
+    if (cfg.compatPopularImdb) {
+      const imdbIds = await Promise.all(window.map(m => fetchImdbIdForMovie(m.id).catch(() => null)));
+      return { metas: window.map((m, i) => metaFromMovieWithId(m, imdbIds[i] || `tmdb:movie:${m.id}`)) };
+    } else {
+      return { metas: window.map(m => metaFromMovieWithId(m, `tmdb:movie:${m.id}`)) };
+    }
   }
 
   // Search-triggered recommendations rails
@@ -247,29 +253,21 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     const slice = collected.slice(skip, skip + PAGE_SIZE);
     const metas = await Promise.all(slice.map(async it => {
       if (resolved.tmdbType === 'tv') {
-        // series recs → open our tmdb page (so our Recommendations list is available)
-        return {
-          id: `tmdb:tv:${it.id}`,
-          type: 'series',
-          name: it.name,
-          poster: tmdbImage(it.poster_path),
-          posterShape: 'poster',
-          releaseInfo: (it.first_air_date || '').slice(0, 4),
-          description: it.overview || ''
-        };
+        // IMPORTANT: prefer IMDb for Web reliability
+        let imdb = null;
+        try { imdb = await fetchImdbIdForSeries(it.id); } catch {}
+        return metaFromSeriesWithId(
+          { id: it.id, name: it.name, original_name: it.original_name, poster_path: it.poster_path, overview: it.overview, first_air_date: it.first_air_date },
+          imdb || `tmdb:tv:${it.id}`
+        );
       } else {
-        // movie recs → prefer IMDb if present, else tmdb
-        let imdbId = null;
-        try { imdbId = (await tmdb(`/movie/${it.id}/external_ids`)).imdb_id || null; } catch {}
-        return {
-          id: imdbId || `tmdb:movie:${it.id}`,
-          type: 'movie',
-          name: it.title,
-          poster: tmdbImage(it.poster_path),
-          posterShape: 'poster',
-          releaseInfo: (it.release_date || '').slice(0, 4),
-          description: it.overview || ''
-        };
+        // movies: prefer IMDb too
+        let imdb = null;
+        try { imdb = await fetchImdbIdForMovie(it.id); } catch {}
+        return metaFromMovieWithId(
+          { id: it.id, title: it.title, original_title: it.original_title, poster_path: it.poster_path, overview: it.overview, release_date: it.release_date },
+          imdb || `tmdb:movie:${it.id}`
+        );
       }
     }));
     return { metas: metas.filter(Boolean) };
@@ -304,7 +302,6 @@ builder.defineMetaHandler(async ({ id }) => {
       poster: tmdbImage(details.poster_path),
       background: details.backdrop_path ? `${TMDB_IMG_BG}${details.backdrop_path}` : undefined,
       releaseInfo: (details.release_date || details.first_air_date || '').slice(0, 4),
-      // Helpful chip to jump to Cinemeta if desired
       links: imdb ? [{
         name: tmdbType === 'movie' ? 'Open standard movie page' : 'Open standard series page',
         url: tmdbType === 'movie' ? `stremio://detail/movie/${imdb}` : `stremio://detail/series/${imdb}`
@@ -407,7 +404,6 @@ builder.defineMetaHandler(async ({ id }) => {
     return { meta };
   }
 
-  // Fallback
   return { meta: {} };
 });
 
@@ -585,4 +581,3 @@ builder.defineStreamHandler(async ({ id, config }) => {
 // ---------- serve ----------
 serveHTTP(builder.getInterface(), { port: process.env.PORT || 7000 });
 console.log(`Add-on running at http://localhost:${process.env.PORT || 7000}/manifest.json`);
-
