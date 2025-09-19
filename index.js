@@ -12,122 +12,65 @@ if (!TMDB_KEY) {
 const TMDB_IMG_W500 = 'https://image.tmdb.org/t/p/w500';
 const TMDB_IMG_BG   = 'https://image.tmdb.org/t/p/w1280';
 
-// ---------- tiny helpers ----------
+// ---------- utils ----------
 async function tmdb(path, params = {}) {
   const url = new URL(`https://api.themoviedb.org/3${path}`);
   url.searchParams.set('api_key', TMDB_KEY);
   url.searchParams.set('language', 'en-GB');
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
   return res.json();
 }
-const tmdbImage = (p) => (p ? `${TMDB_IMG_W500}${p}` : undefined);
+const img = (p) => (p ? `${TMDB_IMG_W500}${p}` : undefined);
 
-// Stremio Web links (work in browsers & web client)
+// Web-friendly links for Streams
 const webSearch = (q) => `https://web.stremio.com/#/search?search=${encodeURIComponent(q)}`;
-const webDetail = (kind, id) => `https://web.stremio.com/#/detail/${kind}/${encodeURIComponent(id)}`; // kind: movie|series
+const webDetail = (kind, id) => `https://web.stremio.com/#/detail/${kind}/${encodeURIComponent(id)}`;
 
-// YouTube trailer for ranking our stream row
-async function getTrailerYtId(tmdbType, tmdbId) {
-  const vids = await tmdb(`/${tmdbType}/${tmdbId}/videos`);
-  const list = vids.results || [];
-  const official = list.find(v => v.site === 'YouTube' && v.type === 'Trailer' && v.official);
-  if (official?.key) return official.key;
-  const anyYT = list.find(v => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser'));
-  return anyYT?.key || null;
-}
-async function findTmdbFromImdb(imdb) {
-  const data = await tmdb(`/find/${imdb}`, { external_source: 'imdb_id' });
-  if (data.movie_results?.[0]) return { tmdbType: 'movie', tmdbId: data.movie_results[0].id };
-  if (data.tv_results?.[0])    return { tmdbType: 'tv',    tmdbId: data.tv_results[0].id };
-  return null;
-}
+// IDs
+async function imdbForTv(tmdbId)    { try { return (await tmdb(`/tv/${tmdbId}/external_ids`)).imdb_id || null; } catch { return null; } }
+async function imdbForMovie(tmdbId) { try { return (await tmdb(`/movie/${tmdbId}/external_ids`)).imdb_id || null; } catch { return null; } }
 
 // TMDB lists
-async function fetchOnTheAirPage(page)      { return tmdb('/tv/on_the_air', { page: String(page) }); }
-async function fetchPopularTvPage(page)     { return tmdb('/tv/popular',    { page: String(page) }); }
-async function fetchPopularMoviePage(page)  { return tmdb('/movie/popular', { page: String(page) }); }
+const getOnAir   = (page) => tmdb('/tv/on_the_air', { page: String(page) });
+const getPopTv   = (page) => tmdb('/tv/popular',    { page: String(page) });
+const getPopMov  = (page) => tmdb('/movie/popular', { page: String(page) });
 
-// Catalog meta builders
-async function fetchImdbIdForSeries(tmdbTvId) {
-  const ext = await tmdb(`/tv/${tmdbTvId}/external_ids`);
-  return ext.imdb_id || null;
-}
-async function fetchImdbIdForMovie(tmdbMovieId) {
-  const ext = await tmdb(`/movie/${tmdbMovieId}/external_ids`);
-  return ext.imdb_id || null;
-}
-function metaFromSeriesWithId(tv, idOverride) {
-  const id = idOverride || `tmdb:tv:${tv.id}`;
-  return {
-    id, type: 'series',
-    name: tv.name || tv.original_name,
-    poster: tmdbImage(tv.poster_path),
-    posterShape: 'poster',
-    description: tv.overview || '',
-    releaseInfo: (tv.first_air_date || '').slice(0, 4),
-    year: tv.first_air_date ? Number(tv.first_air_date.slice(0, 4)) : undefined,
-  };
-}
-function metaFromMovieWithId(movie, idOverride) {
-  const id = idOverride || `tmdb:movie:${movie.id}`;
-  return {
-    id, type: 'movie',
-    name: movie.title || movie.original_title,
-    poster: tmdbImage(movie.poster_path),
-    posterShape: 'poster',
-    description: movie.overview || '',
-    releaseInfo: (movie.release_date || '').slice(0, 4),
-    year: movie.release_date ? Number(movie.release_date.slice(0, 4)) : undefined,
-  };
-}
-
-// Query resolution for the search rails
+// Search / recs
 async function resolveQueryToTmdb(q) {
   const query = (q || '').trim();
   if (!query) return null;
   if (/^tt\d+$/i.test(query)) {
-    const data = await tmdb(`/find/${query}`, { external_source: 'imdb_id' });
-    if (data.movie_results?.[0]) return { tmdbType: 'movie', tmdbId: data.movie_results[0].id };
-    if (data.tv_results?.[0])    return { tmdbType: 'tv',    tmdbId: data.tv_results[0].id };
+    const r = await tmdb(`/find/${query}`, { external_source: 'imdb_id' });
+    if (r.movie_results?.[0]) return { tmdbType: 'movie', tmdbId: r.movie_results[0].id };
+    if (r.tv_results?.[0])    return { tmdbType: 'tv',    tmdbId: r.tv_results[0].id };
     return null;
   }
   const m = await tmdb('/search/movie', { query });
   const t = await tmdb('/search/tv',    { query });
-  const mTop = m.results?.[0];
-  const tTop = t.results?.[0];
-  if (mTop && tTop) {
-    return (Number(mTop.popularity || 0) >= Number(tTop.popularity || 0))
-      ? { tmdbType: 'movie', tmdbId: mTop.id }
-      : { tmdbType: 'tv',    tmdbId: tTop.id };
-  }
-  if (mTop) return { tmdbType: 'movie', tmdbId: mTop.id };
-  if (tTop) return { tmdbType: 'tv',    tmdbId: tTop.id };
+  const mTop = m.results?.[0], tTop = t.results?.[0];
+  if (mTop && tTop) return (Number(mTop.popularity||0) >= Number(tTop.popularity||0)) ? { tmdbType:'movie', tmdbId:mTop.id } : { tmdbType:'tv', tmdbId:tTop.id };
+  if (mTop) return { tmdbType:'movie', tmdbId:mTop.id };
+  if (tTop) return { tmdbType:'tv',    tmdbId:tTop.id };
   return null;
 }
 async function getRecs({ tmdbType, tmdbId, page = 1 }) {
-  const path = tmdbType === 'movie'
-    ? `/movie/${tmdbId}/recommendations`
-    : `/tv/${tmdbId}/recommendations`;
+  const path = tmdbType === 'movie' ? `/movie/${tmdbId}/recommendations` : `/tv/${tmdbId}/recommendations`;
   return tmdb(path, { page: String(page) });
 }
 
-// ---------- manifest (Config visible on install page) ----------
+// ---------- manifest ----------
 const manifest = {
   id: 'org.example.tmdb.onair',
-  version: '2.3.0',
+  version: '2.3.2',
   name: 'TMDB Recommendations & Popular',
   description:
     'Discovery-focused add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
     'Open titles from this add-on to see a Recommendations list for quick discovery. ' +
     'Use the Popular rails to browse trending titles and jump between related ones.',
 
-  behaviorHints: {
-    configurable: true,
-    configurationRequired: false
-  },
-
+  behaviorHints: { configurable: true, configurationRequired: false },
   config: [
     { key: 'enableOnAir',         type: 'boolean', default: 'checked', title: 'Enable “On the air” rail (TV)' },
     { key: 'enableRecsTv',        type: 'boolean', default: 'checked', title: 'Enable “Recommendations” rail (TV)' },
@@ -138,12 +81,11 @@ const manifest = {
 
   resources: [
     'catalog',
-    // IMPORTANT: be explicit with tmdb prefixes for Web
+    // Explicit tmdb prefixes help Stremio Web route meta correctly
     { name: 'meta', types: ['movie', 'series'], idPrefixes: ['tmdb:tv', 'tmdb:movie', 'recs'] },
     'stream'
   ],
   types: ['series', 'movie'],
-  // IMPORTANT: same explicit prefixes for stream routing too
   idPrefixes: ['tt', 'tmdb:tv', 'tmdb:movie', 'recs'],
 
   catalogs: [
@@ -157,7 +99,7 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// ---------- CATALOG handler ----------
+// ---------- CATALOG ----------
 builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
   const cfg = config || {};
   const tmdbPerPage = 20;
@@ -175,22 +117,32 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
   if (type === 'series' && id === 'tmdb-on-air') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
-      const data = await fetchOnTheAirPage(p);
+      const data = await getOnAir(p);
       pages.push(data);
       if (p >= (data.total_pages || p)) break;
     }
     const all = pages.flatMap(pg => pg.results || []);
     const startOffset = skip % tmdbPerPage;
     const window = all.slice(startOffset, startOffset + maxReturn);
-    const imdbIds = await Promise.all(window.map(tv => fetchImdbIdForSeries(tv.id).catch(() => null)));
-    return { metas: window.map((tv, i) => metaFromSeriesWithId(tv, imdbIds[i] || `tmdb:tv:${tv.id}`)) };
+    const imdbIds = await Promise.all(window.map(tv => imdbForTv(tv.id)));
+    return {
+      metas: window.map((tv, i) => ({
+        id: imdbIds[i] || `tmdb:tv:${tv.id}`,
+        type: 'series',
+        name: tv.name || tv.original_name,
+        poster: img(tv.poster_path),
+        posterShape: 'poster',
+        description: tv.overview || '',
+        releaseInfo: (tv.first_air_date || '').slice(0, 4)
+      }))
+    };
   }
 
   // Popular series
   if (type === 'series' && id === 'tmdb-popular-series') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
-      const data = await fetchPopularTvPage(p);
+      const data = await getPopTv(p);
       pages.push(data);
       if (p >= (data.total_pages || p)) break;
     }
@@ -199,18 +151,33 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     const window = all.slice(startOffset, startOffset + maxReturn);
 
     if (cfg.compatPopularImdb) {
-      const imdbIds = await Promise.all(window.map(tv => fetchImdbIdForSeries(tv.id).catch(() => null)));
-      return { metas: window.map((tv, i) => metaFromSeriesWithId(tv, imdbIds[i] || `tmdb:tv:${tv.id}`)) };
-    } else {
-      return { metas: window.map(tv => metaFromSeriesWithId(tv, `tmdb:tv:${tv.id}`)) };
+      const imdbIds = await Promise.all(window.map(tv => imdbForTv(tv.id)));
+      return { metas: window.map((tv, i) => ({
+        id: imdbIds[i] || `tmdb:tv:${tv.id}`,
+        type: 'series',
+        name: tv.name || tv.original_name,
+        poster: img(tv.poster_path),
+        posterShape: 'poster',
+        description: tv.overview || '',
+        releaseInfo: (tv.first_air_date || '').slice(0, 4)
+      })) };
     }
+    return { metas: window.map(tv => ({
+      id: `tmdb:tv:${tv.id}`,
+      type: 'series',
+      name: tv.name || tv.original_name,
+      poster: img(tv.poster_path),
+      posterShape: 'poster',
+      description: tv.overview || '',
+      releaseInfo: (tv.first_air_date || '').slice(0, 4)
+    })) };
   }
 
   // Popular movies
   if (type === 'movie' && id === 'tmdb-popular-movies') {
     const pages = [];
     for (let p = startPage; p <= endPage; p++) {
-      const data = await fetchPopularMoviePage(p);
+      const data = await getPopMov(p);
       pages.push(data);
       if (p >= (data.total_pages || p)) break;
     }
@@ -219,180 +186,167 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
     const window = all.slice(startOffset, startOffset + maxReturn);
 
     if (cfg.compatPopularImdb) {
-      const imdbIds = await Promise.all(window.map(m => fetchImdbIdForMovie(m.id).catch(() => null)));
-      return { metas: window.map((m, i) => metaFromMovieWithId(m, imdbIds[i] || `tmdb:movie:${m.id}`)) };
-    } else {
-      return { metas: window.map(m => metaFromMovieWithId(m, `tmdb:movie:${m.id}`)) };
+      const imdbIds = await Promise.all(window.map(m => imdbForMovie(m.id)));
+      return { metas: window.map((m, i) => ({
+        id: imdbIds[i] || `tmdb:movie:${m.id}`,
+        type: 'movie',
+        name: m.title || m.original_title,
+        poster: img(m.poster_path),
+        posterShape: 'poster',
+        description: m.overview || '',
+        releaseInfo: (m.release_date || '').slice(0, 4)
+      })) };
     }
+    return { metas: window.map(m => ({
+      id: `tmdb:movie:${m.id}`,
+      type: 'movie',
+      name: m.title || m.original_title,
+      poster: img(m.poster_path),
+      posterShape: 'poster',
+      description: m.overview || '',
+      releaseInfo: (m.release_date || '').slice(0, 4)
+    })) };
   }
 
-  // Search-triggered recommendations rails
+  // Search-triggered recs rails
   if (id === 'tmdb-recs-movie' || id === 'tmdb-recs-series') {
     const q = (extra?.search || '').trim();
     const PAGE_SIZE = 50;
-
     const resolved = await resolveQueryToTmdb(q);
     if (!resolved) return { metas: [] };
-
     const wantType = (id === 'tmdb-recs-movie') ? 'movie' : 'tv';
     if (resolved.tmdbType !== wantType) return { metas: [] };
 
     let collected = [];
-    let page = 1;
-    while (collected.length < skip + PAGE_SIZE && page <= 10) {
+    for (let page = 1; collected.length < skip + PAGE_SIZE && page <= 10; page++) {
       const recs = await getRecs({ tmdbType: resolved.tmdbType, tmdbId: resolved.tmdbId, page });
       collected = collected.concat(recs.results || []);
       if (page >= (recs.total_pages || page)) break;
-      page++;
     }
-
     const slice = collected.slice(skip, skip + PAGE_SIZE);
-    const metas = await Promise.all(slice.map(async it => {
-      if (resolved.tmdbType === 'tv') {
-        let imdb = null; try { imdb = await fetchImdbIdForSeries(it.id); } catch {}
-        return metaFromSeriesWithId(
-          { id: it.id, name: it.name, original_name: it.original_name, poster_path: it.poster_path, overview: it.overview, first_air_date: it.first_air_date },
-          imdb || `tmdb:tv:${it.id}`
-        );
-      } else {
-        let imdb = null; try { imdb = await fetchImdbIdForMovie(it.id); } catch {}
-        return metaFromMovieWithId(
-          { id: it.id, title: it.title, original_title: it.original_title, poster_path: it.poster_path, overview: it.overview, release_date: it.release_date },
-          imdb || `tmdb:movie:${it.id}`
-        );
-      }
-    }));
-    return { metas: metas.filter(Boolean) };
+
+    if (resolved.tmdbType === 'tv') {
+      const ids = await Promise.all(slice.map(it => imdbForTv(it.id)));
+      return { metas: slice.map((it, i) => ({
+        id: ids[i] || `tmdb:tv:${it.id}`,
+        type: 'series',
+        name: it.name,
+        poster: img(it.poster_path),
+        posterShape: 'poster',
+        description: it.overview || '',
+        releaseInfo: (it.first_air_date || '').slice(0, 4)
+      })) };
+    } else {
+      const ids = await Promise.all(slice.map(it => imdbForMovie(it.id)));
+      return { metas: slice.map((it, i) => ({
+        id: ids[i] || `tmdb:movie:${it.id}`,
+        type: 'movie',
+        name: it.title,
+        poster: img(it.poster_path),
+        posterShape: 'poster',
+        description: it.overview || '',
+        releaseInfo: (it.release_date || '').slice(0, 4)
+      })) };
+    }
   }
 
   return { metas: [] };
 });
 
-// ---------- META handler ----------
-builder.defineMetaHandler(async ({ id }) => {
-  // A) tmdb:* page → show a "Recommendations" list (20 items)
-  const tm = id.match(/^tmdb:(movie|tv):(\d+)$/i);
-  if (tm) {
-    const tmdbType = tm[1] === 'movie' ? 'movie' : 'tv';
-    const tmdbId = tm[2];
+// ---------- META ----------
+builder.defineMetaHandler(async ({ type, id }) => {
+  // tmdb pages -> our enhanced detail with Season 0 recs (20)
+  const m = id.match(/^tmdb:(movie|tv):(\d+)$/i);
+  if (m) {
+    const tmdbType = m[1] === 'movie' ? 'movie' : 'tv';
+    const tmdbId = m[2];
 
-    // Debug (helps confirm Web is hitting us)
-    console.log('[META tmdb]', tmdbType, tmdbId);
-
-    const [details, ext] = await Promise.all([
-      tmdb(`/${tmdbType}/${tmdbId}`),
-      tmdb(`/${tmdbType}/${tmdbId}/external_ids`).catch(() => ({}))
-    ]);
-
+    const [details] = await Promise.all([ tmdb(`/${tmdbType}/${tmdbId}`) ]);
     const title = (details.title || details.name || '').trim();
-    const imdb  = ext?.imdb_id || null;
+    const poster = img(details.poster_path) || img(details.backdrop_path) || undefined;
 
+    // IMPORTANT: force type to what Stremio asked for
     const meta = {
       id,
-      type: tmdbType === 'movie' ? 'movie' : 'series',
+      type, // 'series' or 'movie' from the request
       name: title || id,
       description: details.overview || '',
-      poster: tmdbImage(details.poster_path),
+      poster,
       background: details.backdrop_path ? `${TMDB_IMG_BG}${details.backdrop_path}` : undefined,
       releaseInfo: (details.release_date || details.first_air_date || '').slice(0, 4),
-      links: imdb ? [{
-        name: tmdbType === 'movie' ? 'Open standard movie page' : 'Open standard series page',
-        url: tmdbType === 'movie' ? `stremio://detail/movie/${imdb}` : `stremio://detail/series/${imdb}`
-      }] : []
+      seasons: [{ season: 0, name: 'Recommendations' }]
     };
 
-    meta.seasons = [{ season: 0, name: 'Recommendations' }];
-
+    // Build Season 0 (first 20 recs)
     const recs = await getRecs({ tmdbType, tmdbId, page: 1 });
     const first20 = (recs.results || []).slice(0, 20);
 
     meta.videos = await Promise.all(first20.map(async (item, i) => {
-      let imdbId = null;
-      try { imdbId = (await tmdb(`/${tmdbType}/${item.id}/external_ids`)).imdb_id || null; } catch {}
-      const epTitle = (item.title || item.name || '').trim() || `Recommendation ${i + 1}`;
-      const epYear  = (item.release_date || item.first_air_date || '').slice(0, 4);
-      const epDesc  = item.overview || '';
-      const target  = imdbId ? `tt:${imdbId}` : `tmdb-${item.id}`;
-      const kind    = tmdbType === 'movie' ? 'movie' : 'series';
+      // prefer IMDb for navigation when the user clicks the "episode"
+      let imdb = null;
+      try {
+        imdb = tmdbType === 'movie' ? await imdbForMovie(item.id) : await imdbForTv(item.id);
+      } catch {}
+      const displayTitle = (item.title || item.name || '').trim() || `Recommendation ${i+1}`;
+      const year = (item.release_date || item.first_air_date || '').slice(0, 4);
+      const target = imdb ? `tt:${imdb}` : `tmdb-${item.id}`;
+      const kind   = tmdbType === 'movie' ? 'movie' : 'series';
 
       return {
         season: 0,
-        episode: i + 1, // ensure small 1..20 episodes (prevents "episode 119051" displays)
+        episode: i + 1,  // always 1..20 (prevents "episode 119051")
         id: `recs:${kind}:${target}`,
-        title: epYear ? `${epTitle} (${epYear})` : epTitle,
-        overview: epDesc,
-        thumbnail: tmdbImage(item.poster_path)
+        title: year ? `${displayTitle} (${year})` : displayTitle,
+        overview: item.overview || '',
+        thumbnail: img(item.poster_path)
       };
     }));
 
     return { meta };
   }
 
-  // B) recs:* page (for "See more recommendations for this")
-  const rm = id.match(/^recs:(movie|series):(tt:tt\d+|tmdb-\d+)$/i);
-  if (rm) {
-    const isMovie = rm[1] === 'movie';
+  // "See more recommendations" synthetic pages
+  const r = id.match(/^recs:(movie|series):(tt:tt\d+|tmdb-\d+)$/i);
+  if (r) {
+    const isMovie = r[1] === 'movie';
     let tmdbType  = isMovie ? 'movie' : 'tv';
-    let imdb = null, tmdbId = null;
+    let tmdbId = null;
 
-    console.log('[META recs]', rm[1], rm[2]);
-
-    if (rm[2].startsWith('tt:')) {
-      imdb = rm[2].slice(3);
-      const found = await findTmdbFromImdb(imdb);
-      if (found) { tmdbType = found.tmdbType; tmdbId = String(found.tmdbId); }
+    if (r[2].startsWith('tt:')) {
+      const imdb = r[2].slice(3);
+      const found = await (async () => {
+        const data = await tmdb(`/find/${imdb}`, { external_source: 'imdb_id' });
+        if (data.movie_results?.[0]) return { tmdbType:'movie', tmdbId:String(data.movie_results[0].id) };
+        if (data.tv_results?.[0])    return { tmdbType:'tv',    tmdbId:String(data.tv_results[0].id) };
+        return null;
+      })();
+      if (found) { tmdbType = found.tmdbType; tmdbId = found.tmdbId; }
     } else {
-      tmdbId = rm[2].slice(5);
+      tmdbId = r[2].slice(5);
     }
 
-    let baseTitle = '';
-    if (tmdbId) {
-      try {
-        const d = await tmdb(`/${tmdbType}/${tmdbId}`);
-        baseTitle = (d.title || d.name || '').trim();
-        if (!imdb) {
-          const ext = await tmdb(`/${tmdbType}/${tmdbId}/external_ids`);
-          imdb = ext.imdb_id || null;
-        }
-      } catch (_) {}
-    }
-
-    const meta = {
-      id,
-      type: isMovie ? 'movie' : 'series',
-      name: baseTitle ? `More recommendations for: ${baseTitle}` : 'More recommendations',
-      description: `Additional related ${isMovie ? 'movies' : 'shows'} based on TMDB.`,
-      seasons: [{ season: 0, name: 'Recommendations' }],
-      links: imdb ? [{
-        name: isMovie ? 'Open standard movie page' : 'Open standard series page',
-        url: isMovie ? `stremio://detail/movie/${imdb}` : `stremio://detail/series/${imdb}`
-      }] : []
-    };
+    const name = 'More recommendations';
+    const meta = { id, type: isMovie ? 'movie' : 'series', name, description: `Additional related ${isMovie?'movies':'shows'} based on TMDB.`, seasons: [{ season: 0, name: 'Recommendations' }], videos: [] };
 
     if (tmdbId) {
       const recs = await getRecs({ tmdbType, tmdbId, page: 1 });
       const first20 = (recs.results || []).slice(0, 20);
-
       meta.videos = await Promise.all(first20.map(async (item, i) => {
-        let imdbId = null;
-        try { imdbId = (await tmdb(`/${tmdbType}/${item.id}/external_ids`)).imdb_id || null; } catch {}
-        const epTitle = (item.title || item.name || '').trim() || `Recommendation ${i + 1}`;
-        const epYear  = (item.release_date || item.first_air_date || '').slice(0, 4);
-        const epDesc  = item.overview || '';
-        const target  = imdbId ? `tt:${imdbId}` : `tmdb-${item.id}`;
-        const kind    = tmdbType === 'movie' ? 'movie' : 'series';
-
+        let imdb = null;
+        try { imdb = tmdbType === 'movie' ? await imdbForMovie(item.id) : await imdbForTv(item.id); } catch {}
+        const displayTitle = (item.title || item.name || '').trim() || `Recommendation ${i+1}`;
+        const year = (item.release_date || item.first_air_date || '').slice(0, 4);
+        const target = imdb ? `tt:${imdb}` : `tmdb-${item.id}`;
+        const kind   = tmdbType === 'movie' ? 'movie' : 'series';
         return {
           season: 0,
           episode: i + 1,
           id: `recs:${kind}:${target}`,
-          title: epYear ? `${epTitle} (${epYear})` : epTitle,
-          overview: epDesc,
-          thumbnail: tmdbImage(item.poster_path)
+          title: year ? `${displayTitle} (${year})` : displayTitle,
+          overview: item.overview || '',
+          thumbnail: img(item.poster_path)
         };
       }));
-    } else {
-      meta.videos = [];
     }
 
     return { meta };
@@ -401,10 +355,9 @@ builder.defineMetaHandler(async ({ id }) => {
   return { meta: {} };
 });
 
-// ---------- STREAM handler ----------
+// ---------- STREAMS ----------
 builder.defineStreamHandler(async ({ id, config }) => {
   const cfg = config || {};
-
   const makeRecRow = (label, searchQuery, ytId) => ({
     ...(ytId ? { ytId } : {}),
     name: label,
@@ -412,92 +365,67 @@ builder.defineStreamHandler(async ({ id, config }) => {
     externalUrl: `stremio://search?search=${encodeURIComponent(searchQuery)}`
   });
 
-  // recs:series:...
+  // Synthetic rec "episodes"
   const rs = id.match(/^recs:series:(tt:tt\d+|tmdb-\d+)$/i);
   if (rs) {
-    let imdb = null, tmdbId = null;
-    if (rs[1].startsWith('tt:')) imdb = rs[1].slice(3);
-    else tmdbId = rs[1].slice(5);
-
-    if (!imdb && tmdbId) { try { imdb = (await tmdb(`/tv/${tmdbId}/external_ids`)).imdb_id || null; } catch {} }
+    let imdb = rs[1].startsWith('tt:') ? rs[1].slice(3) : null;
+    let tmdbId = rs[1].startsWith('tmdb-') ? rs[1].slice(5) : null;
+    if (!imdb && tmdbId) imdb = await imdbForTv(tmdbId);
 
     const streams = [];
     if (imdb) {
       streams.push({ name: 'Open series details', description: 'Go to the series page', externalUrl: `stremio://detail/series/${imdb}` });
       streams.push({ name: 'Open series details (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('series', imdb) });
-    } else {
-      let title = ''; try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
-      const q = title || 'recommendations';
-      streams.push({ name: 'Open series details', description: 'Go to the series page (via search)', externalUrl: `stremio://search?search=${encodeURIComponent(q)}` });
-      streams.push({ name: 'Open series details (browser)', description: 'Open in Stremio Web', externalUrl: webSearch(q) });
     }
     const moreId = imdb ? `recs:series:tt:${imdb}` : `recs:series:tmdb-${tmdbId}`;
-    streams.push({ name: 'See more recommendations for this', description: 'Open more related shows', externalUrl: `stremio://detail/series/${moreId}` });
-    streams.push({ name: 'See more recommendations (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('series', moreId) });
+    streams.push({ name: 'See more recommendations for this', description: 'Open more related shows',  externalUrl: `stremio://detail/series/${moreId}` });
+    streams.push({ name: 'See more recommendations (browser)', description: 'Open in Stremio Web',    externalUrl: webDetail('series', moreId) });
     return { streams };
   }
 
-  // recs:movie:...
   const rm = id.match(/^recs:movie:(tt:tt\d+|tmdb-\d+)$/i);
   if (rm) {
-    let imdb = null, tmdbId = null;
-    if (rm[1].startsWith('tt:')) imdb = rm[1].slice(3);
-    else tmdbId = rm[1].slice(5);
-
-    if (!imdb && tmdbId) { try { imdb = (await tmdb(`/movie/${tmdbId}/external_ids`)).imdb_id || null; } catch {} }
+    let imdb = rm[1].startsWith('tt:') ? rm[1].slice(3) : null;
+    let tmdbId = rm[1].startsWith('tmdb-') ? rm[1].slice(5) : null;
+    if (!imdb && tmdbId) imdb = await imdbForMovie(tmdbId);
 
     const streams = [];
     if (imdb) {
       streams.push({ name: 'Open movie details', description: 'Go to the movie page', externalUrl: `stremio://detail/movie/${imdb}` });
       streams.push({ name: 'Open movie details (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('movie', imdb) });
-    } else {
-      let title = ''; try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
-      const q = title || 'recommendations';
-      streams.push({ name: 'Open movie details', description: 'Go to the movie page (via search)', externalUrl: `stremio://search?search=${encodeURIComponent(q)}` });
-      streams.push({ name: 'Open movie details (browser)', description: 'Open in Stremio Web', externalUrl: webSearch(q) });
     }
     const moreId = imdb ? `recs:movie:tt:${imdb}` : `recs:movie:tmdb-${tmdbId}`;
     streams.push({ name: 'See more recommendations for this', description: 'Open more related movies', externalUrl: `stremio://detail/movie/${moreId}` });
-    streams.push({ name: 'See more recommendations (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('movie', moreId) });
+    streams.push({ name: 'See more recommendations (browser)', description: 'Open in Stremio Web',     externalUrl: webDetail('movie', moreId) });
     return { streams };
   }
 
-  // Normal IMDb ids → two rows (in app + browser)
+  // IMDb items (normal pages) — add Recommendations rows (in-app + browser)
   const imdbMatch = id.match(/^(tt\d+)(?::\d+:\d+)?$/i);
   if (imdbMatch) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const imdb = imdbMatch[1];
-
-    let ytId = null;
-    try {
-      const found = await findTmdbFromImdb(imdb);
-      if (found) ytId = await getTrailerYtId(found.tmdbType, found.tmdbId);
-    } catch (_) {}
-
     return {
       streams: [
-        makeRecRow('TMDB Recommendations (in app)', imdb, ytId),
+        makeRecRow('TMDB Recommendations (in app)', imdb),
         { name: 'TMDB Recommendations (in browser)', description: 'Open Stremio Web search with recommendations.', externalUrl: webSearch(imdb) }
       ]
     };
   }
 
-  // tmdb fallback ids → two rows (in app + browser)
+  // tmdb fallback ids — also give both rows
   const tmdbMatch = id.match(/^tmdb:(movie|tv):(\d+)(?::\d+:\d+)?$/i);
   if (tmdbMatch) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const tmdbType = tmdbMatch[1] === 'movie' ? 'movie' : 'tv';
     const tmdbId   = tmdbMatch[2];
-    let imdb = null, title = '', ytId = null;
-
-    try { imdb = (await tmdb(`/${tmdbType}/${tmdbId}/external_ids`)).imdb_id || null; } catch {}
+    let imdb = null, title = '';
+    try { imdb = tmdbType === 'movie' ? await imdbForMovie(tmdbId) : await imdbForTv(tmdbId); } catch {}
     try { const d = await tmdb(`/${tmdbType}/${tmdbId}`); title = (d.title || d.name || '').trim(); } catch {}
-    try { ytId = await getTrailerYtId(tmdbType, tmdbId); } catch {}
-
     const query = imdb || title || 'recommendations';
     return {
       streams: [
-        makeRecRow('TMDB Recommendations (in app)', query, ytId),
+        makeRecRow('TMDB Recommendations (in app)', query),
         { name: 'TMDB Recommendations (in browser)', description: 'Open Stremio Web search with recommendations.', externalUrl: webSearch(query) }
       ]
     };
