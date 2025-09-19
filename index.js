@@ -551,8 +551,8 @@ app.get('/configure', async (req, res) => {
 });
 
 // ---------- Stremio endpoints (GET & POST) ----------
-+ const parseBody = express.json();
-+ const sendJSON = (res, obj) => res.type('application/json').send(JSON.stringify(obj));
+const parseBody = express.json();
+const sendJSON = (res, obj) => res.type('application/json').send(JSON.stringify(obj));
 
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
@@ -586,4 +586,5 @@ app.listen(PORT, () => {
   console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
   console.log(`Configure: http://localhost:${PORT}/configure`);
 });
+
 
