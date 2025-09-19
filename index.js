@@ -24,7 +24,7 @@ async function tmdb(path, params = {}) {
 }
 const img = (p) => (p ? `${TMDB_IMG_W500}${p}` : undefined);
 
-// Web-friendly links for Streams
+// Stremio Web links (same-tab hash routes)
 const webSearch = (q) => `https://web.stremio.com/#/search?search=${encodeURIComponent(q)}`;
 const webDetail = (kind, id) => `https://web.stremio.com/#/detail/${kind}/${encodeURIComponent(id)}`;
 
@@ -71,12 +71,11 @@ async function getRecs({ tmdbType, tmdbId, page = 1 }) {
 // ---------- manifest ----------
 const manifest = {
   id: 'org.example.tmdb.onair',
-  version: '2.3.3',
-  name: 'TMDB Recommendations & Popular',
+  version: '2.3.4',
+  name: 'TMDB Recs', // shorter name (mobile-friendly)
   description:
-    'Discovery-focused add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
-    'Open titles from this add-on to see a Recommendations list for quick discovery. ' +
-    'Use the Popular rails to browse trending titles and jump between related ones.',
+    'Discovery add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
+    'Open titles to see a Recommendations list. Popular rails browse trending titles and jump to related ones.',
 
   behaviorHints: { configurable: true, configurationRequired: false },
   config: [
@@ -262,7 +261,7 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
 
 // ---------- META ----------
 builder.defineMetaHandler(async ({ type, id }) => {
-  // tmdb pages -> our enhanced detail with Season 0 recs (20)
+  // tmdb pages -> enhanced detail with Season 0 recs (20)
   const m = id.match(/^tmdb:(movie|tv):(\d+)$/i);
   if (m) {
     const tmdbType = m[1] === 'movie' ? 'movie' : 'tv';
@@ -306,10 +305,9 @@ builder.defineMetaHandler(async ({ type, id }) => {
     return { meta };
   }
 
-  // Synthetic "more recommendations" page (kept for backwards compatibility)
+  // Minimal synthetic page (kept for backwards compatibility)
   const r = id.match(/^recs:(movie|series):(tt:tt\d+|tmdb-\d+)$/i);
   if (r) {
-    // We still return something valid, but your Streams button now targets tmdb:* detail instead.
     const isMovie = r[1] === 'movie';
     return { meta: {
       id,
@@ -327,11 +325,15 @@ builder.defineMetaHandler(async ({ type, id }) => {
 // ---------- STREAMS ----------
 builder.defineStreamHandler(async ({ id, config }) => {
   const cfg = config || {};
-  const makeRecRow = (label, searchQuery, ytId) => ({
-    ...(ytId ? { ytId } : {}),
-    name: label,
-    description: 'Open Stremio Search to view related titles.',
+  const makeAppRow = (label, searchQuery) => ({
+    name: `APP • ${label}`,
+    description: 'Open in the Stremio app',
     externalUrl: `stremio://search?search=${encodeURIComponent(searchQuery)}`
+  });
+  const makeWebRow = (label, url) => ({
+    name: `WEB • ${label}`,
+    description: 'Open in Stremio Web',
+    externalUrl: url
   });
 
   // Synthetic rec "episodes" (series)
@@ -340,7 +342,6 @@ builder.defineStreamHandler(async ({ id, config }) => {
     let imdb = rs[1].startsWith('tt:') ? rs[1].slice(3) : null;
     let tmdbId = rs[1].startsWith('tmdb-') ? rs[1].slice(5) : null;
 
-    // Ensure we know the TMDB id to jump to the *real* detail page
     if (!tmdbId && imdb) {
       const found = await tmdbFromImdb(imdb);
       if (found?.tmdbType === 'tv') tmdbId = String(found.tmdbId);
@@ -348,23 +349,24 @@ builder.defineStreamHandler(async ({ id, config }) => {
     if (!imdb && tmdbId) imdb = await imdbForTv(tmdbId);
 
     const streams = [];
-    // (1) Open normal details (Cinemeta or search) – keep both
+
+    // Open normal details
     if (imdb) {
-      streams.push({ name: 'Open series details', description: 'Go to the series page', externalUrl: `stremio://detail/series/${imdb}` });
-      streams.push({ name: 'Open series details (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('series', imdb) });
+      streams.push({ name: 'APP • Open details', description: 'Go to series page', externalUrl: `stremio://detail/series/${imdb}` });
+      streams.push(makeWebRow('Open details', webDetail('series', imdb)));
     } else {
-      let title = '';
-      try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
+      let title = ''; try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
       const q = title || 'recommendations';
-      streams.push({ name: 'Open series details', description: 'Go to the series page (via search)', externalUrl: `stremio://search?search=${encodeURIComponent(q)}` });
-      streams.push({ name: 'Open series details (browser)', description: 'Open in Stremio Web', externalUrl: webSearch(q) });
+      streams.push(makeAppRow('Open details (via search)', q));
+      streams.push(makeWebRow('Open details (via search)', webSearch(q)));
     }
 
-    // (2) NEW: Jump directly to the proper TMDB detail page for this title (with Season-0 recs)
+    // See more recommendations → jump to proper TMDB detail (RAW id for APP, encoded for WEB)
     if (tmdbId) {
-      const tmdbSeriesId = `tmdb:tv:${tmdbId}`;
-      streams.push({ name: 'See more recommendations for this', description: 'Open recommendations page for this series', externalUrl: `stremio://detail/series/${encodeURIComponent(tmdbSeriesId)}` });
-      streams.push({ name: 'See more recommendations (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('series', tmdbSeriesId) });
+      const tmdbSeriesIdRaw   = `tmdb:tv:${tmdbId}`;
+      const tmdbSeriesIdWeb   = tmdbSeriesIdRaw; // webDetail will encode
+      streams.push({ name: 'APP • See more recs', description: 'Open recs page for this series', externalUrl: `stremio://detail/series/${tmdbSeriesIdRaw}` });
+      streams.push(makeWebRow('See more recs', webDetail('series', tmdbSeriesIdWeb)));
     }
 
     return { streams };
@@ -383,36 +385,36 @@ builder.defineStreamHandler(async ({ id, config }) => {
     if (!imdb && tmdbId) imdb = await imdbForMovie(tmdbId);
 
     const streams = [];
+
     if (imdb) {
-      streams.push({ name: 'Open movie details', description: 'Go to the movie page', externalUrl: `stremio://detail/movie/${imdb}` });
-      streams.push({ name: 'Open movie details (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('movie', imdb) });
+      streams.push({ name: 'APP • Open details', description: 'Go to movie page', externalUrl: `stremio://detail/movie/${imdb}` });
+      streams.push(makeWebRow('Open details', webDetail('movie', imdb)));
     } else {
-      let title = '';
-      try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
+      let title = ''; try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
       const q = title || 'recommendations';
-      streams.push({ name: 'Open movie details', description: 'Go to the movie page (via search)', externalUrl: `stremio://search?search=${encodeURIComponent(q)}` });
-      streams.push({ name: 'Open movie details (browser)', description: 'Open in Stremio Web', externalUrl: webSearch(q) });
+      streams.push(makeAppRow('Open details (via search)', q));
+      streams.push(makeWebRow('Open details (via search)', webSearch(q)));
     }
 
-    // NEW: Jump directly to the proper TMDB detail page for this movie (with Season-0 recs)
     if (tmdbId) {
-      const tmdbMovieId = `tmdb:movie:${tmdbId}`;
-      streams.push({ name: 'See more recommendations for this', description: 'Open recommendations page for this movie', externalUrl: `stremio://detail/movie/${encodeURIComponent(tmdbMovieId)}` });
-      streams.push({ name: 'See more recommendations (browser)', description: 'Open in Stremio Web', externalUrl: webDetail('movie', tmdbMovieId) });
+      const tmdbMovieIdRaw = `tmdb:movie:${tmdbId}`;
+      const tmdbMovieIdWeb = tmdbMovieIdRaw;
+      streams.push({ name: 'APP • See more recs', description: 'Open recs page for this movie', externalUrl: `stremio://detail/movie/${tmdbMovieIdRaw}` });
+      streams.push(makeWebRow('See more recs', webDetail('movie', tmdbMovieIdWeb)));
     }
 
     return { streams };
   }
 
-  // IMDb items (normal pages) — add Recommendations rows (in-app + browser)
+  // IMDb items (normal pages) — add Recommendations rows (APP + WEB)
   const imdbMatch = id.match(/^(tt\d+)(?::\d+:\d+)?$/i);
   if (imdbMatch) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const imdb = imdbMatch[1];
     return {
       streams: [
-        makeRecRow('TMDB Recommendations (in app)', imdb),
-        { name: 'TMDB Recommendations (in browser)', description: 'Open Stremio Web search with recommendations.', externalUrl: webSearch(imdb) }
+        { name: 'APP • TMDB recs', description: 'Open related titles', externalUrl: `stremio://search?search=${encodeURIComponent(imdb)}` },
+        makeWebRow('TMDB recs', webSearch(imdb))
       ]
     };
   }
@@ -429,8 +431,8 @@ builder.defineStreamHandler(async ({ id, config }) => {
     const query = imdb || title || 'recommendations';
     return {
       streams: [
-        makeRecRow('TMDB Recommendations (in app)', query),
-        { name: 'TMDB Recommendations (in browser)', description: 'Open Stremio Web search with recommendations.', externalUrl: webSearch(query) }
+        { name: 'APP • TMDB recs', description: 'Open related titles', externalUrl: `stremio://search?search=${encodeURIComponent(query)}` },
+        makeWebRow('TMDB recs', webSearch(query))
       ]
     };
   }
