@@ -1,18 +1,15 @@
 {
   "name": "tmdb-addon",
-  "version": "1.0.0",
-  "description": "Stremio add-on: TMDB recommendations with Season 0 + Popular rails",
+  "version": "2.5.0",
+  "description": "TMDB Recs – discovery add-on for Stremio",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": "22.x"
-  },
-  "license": "ISC",
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "stremio-addon-sdk": "1.6.10"
+    "dotenv": "^17.2.2",
+    "express": "^4.19.2",
+    "stremio-addon-sdk": "^1.6.10"
   }
 }
