@@ -1,4 +1,4 @@
-// index.js (ESM) — Stremio add-on + custom landing page with single-page config and backdrop
+// index.js (ESM) — Stremio add-on + custom landing page (single page) with TV-friendly deeplinks
 import 'dotenv/config';
 import express from 'express';
 import sdk from 'stremio-addon-sdk';
@@ -34,6 +34,7 @@ const img = (p) => (p ? `${TMDB_IMG_W500}${p}` : undefined);
 const webSearch = (q) => `https://web.stremio.com/#/search?search=${encodeURIComponent(q)}`;
 const webDetail = (kind, id) => `https://web.stremio.com/#/detail/${kind}/${encodeURIComponent(id)}`;
 
+// Read persistent config from the installed URL's query params
 function cfgFromQuery(q = {}) {
   const bool = (v, d) => (v === '1' || v === 'true' || v === true) ? true : (v === '0' || v === 'false') ? false : d;
   return {
@@ -59,6 +60,7 @@ async function tmdbFromImdb(imdb) {
 const getOnAir   = (p) => tmdb('/tv/on_the_air', { page: String(p) });
 const getPopTv   = (p) => tmdb('/tv/popular',    { page: String(p) });
 const getPopMov  = (p) => tmdb('/movie/popular', { page: String(p) });
+
 async function resolveQueryToTmdb(q) {
   const query = (q || '').trim();
   if (!query) return null;
@@ -81,10 +83,28 @@ async function getRecs({ tmdbType, tmdbId, page = 1 }) {
   return tmdb(path, { page: String(page) });
 }
 
+// NEW: TV-friendly search query (Title + Year) for APP deep links
+async function titleQueryForImdb(imdbId) {
+  try {
+    const found = await tmdb(`/find/${imdbId}`, { external_source: 'imdb_id' });
+    if (found.movie_results?.[0]) {
+      const m = found.movie_results[0];
+      const y = (m.release_date || '').slice(0, 4);
+      return `${m.title || m.original_title}${y ? ` ${y}` : ''}`.trim();
+    }
+    if (found.tv_results?.[0]) {
+      const t = found.tv_results[0];
+      const y = (t.first_air_date || '').slice(0, 4);
+      return `${t.name || t.original_name}${y ? ` ${y}` : ''}`.trim();
+    }
+  } catch {}
+  return null;
+}
+
 // ---------- Stremio manifest ----------
 const manifest = {
   id: 'org.example.tmdb.onair',
-  version: '2.6.0',
+  version: '2.6.1',
   name: 'TMDB Recs',
   description:
     'Discovery add-on for Stremio. Optional rails: “On the air” (TV) and “Recommendations” (TV/Movies). ' +
@@ -245,8 +265,8 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
 
     if (resolved.tmdbType === 'tv') {
       const ids = await Promise.all(slice.map(it => imdbForTv(it.id)));
-      return { metas: slice.map((it, i) => ({
-        id: ids[i] || `tmdb:tv:${it.id}`,
+      return { metas: slice.map((it) => ({
+        id: ids[slice.indexOf(it)] || `tmdb:tv:${it.id}`,
         type: 'series',
         name: it.name,
         poster: img(it.poster_path),
@@ -256,8 +276,8 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
       })) };
     } else {
       const ids = await Promise.all(slice.map(it => imdbForMovie(it.id)));
-      return { metas: slice.map((it, i) => ({
-        id: ids[i] || `tmdb:movie:${it.id}`,
+      return { metas: slice.map((it) => ({
+        id: ids[slice.indexOf(it)] || `tmdb:movie:${it.id}`,
         type: 'movie',
         name: it.title,
         poster: img(it.poster_path),
@@ -333,10 +353,13 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     if (!imdb && tmdbId) imdb = await imdbForTv(tmdbId);
 
     const streams = [];
-    if (imdb) { streams.push(appRow('Open details', `stremio:///detail/series/${imdb}`)); streams.push(webRow('Open details', webDetail('series', imdb))); }
-    else {
-      let title = ''; try { title = (await tmdb(`/tv/${tmdbId}`)).name || ''; } catch {}
-      const q = title || 'recommendations';
+    if (imdb) {
+      streams.push(appRow('Open details', `stremio:///detail/series/${imdb}`));
+      streams.push(webRow('Open details', webDetail('series', imdb)));
+    } else {
+      let title = '', year = '';
+      try { const d = await tmdb(`/tv/${tmdbId}`); title = (d.name || '').trim(); year = (d.first_air_date || '').slice(0,4); } catch {}
+      const q = title ? `${title}${year ? ` ${year}` : ''}` : 'recommendations';
       streams.push(appRow('Open details (via search)', `stremio:///search?search=${encodeURIComponent(q)}`));
       streams.push(webRow('Open details (via search)', webSearch(q)));
     }
@@ -357,10 +380,13 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     if (!imdb && tmdbId) imdb = await imdbForMovie(tmdbId);
 
     const streams = [];
-    if (imdb) { streams.push(appRow('Open details', `stremio:///detail/movie/${imdb}`)); streams.push(webRow('Open details', webDetail('movie', imdb))); }
-    else {
-      let title = ''; try { title = (await tmdb(`/movie/${tmdbId}`)).title || ''; } catch {}
-      const q = title || 'recommendations';
+    if (imdb) {
+      streams.push(appRow('Open details', `stremio:///detail/movie/${imdb}`));
+      streams.push(webRow('Open details', webDetail('movie', imdb)));
+    } else {
+      let title = '', year = '';
+      try { const d = await tmdb(`/movie/${tmdbId}`); title = (d.title || '').trim(); year = (d.release_date || '').slice(0,4); } catch {}
+      const q = title ? `${title}${year ? ` ${year}` : ''}` : 'recommendations';
       streams.push(appRow('Open details (via search)', `stremio:///search?search=${encodeURIComponent(q)}`));
       streams.push(webRow('Open details (via search)', webSearch(q)));
     }
@@ -372,31 +398,36 @@ builder.defineStreamHandler(async ({ id, config, extra }) => {
     return { streams };
   }
 
-  // Normal IMDb items
+  // Normal IMDb items → use Title+Year for TV search
   const imdbMatch = id.match(/^(tt\d+)(?::\d+:\d+)?$/i);
   if (imdbMatch) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const imdb = imdbMatch[1];
-    return { streams: [
-      appRow('TMDB recs', `stremio:///search?search=${encodeURIComponent(imdb)}`),
-      webRow('TMDB recs', webSearch(imdb))
-    ] };
+    const qTitle = (await titleQueryForImdb(imdb)) || imdb;
+    return {
+      streams: [
+        appRow('TMDB recs', `stremio:///search?search=${encodeURIComponent(qTitle)}`),
+        webRow('TMDB recs', webSearch(qTitle))
+      ]
+    };
   }
 
-  // tmdb fallback ids
+  // tmdb fallback ids → Title+Year preferred
   const t = id.match(/^tmdb:(movie|tv):(\d+)(?::\d+:\d+)?$/i);
   if (t) {
     if (cfg.enableStreamsRecs === false) return { streams: [] };
     const tmdbType = t[1] === 'movie' ? 'movie' : 'tv';
     const tmdbId   = t[2];
-    let imdb = null, title = '';
+    let imdb = null, title = '', year = '';
     try { imdb = tmdbType === 'movie' ? await imdbForMovie(tmdbId) : await imdbForTv(tmdbId); } catch {}
-    try { const d = await tmdb(`/${tmdbType}/${tmdbId}`); title = (d.title || d.name || '').trim(); } catch {}
-    const query = imdb || title || 'recommendations';
-    return { streams: [
-      appRow('TMDB recs', `stremio:///search?search=${encodeURIComponent(query)}`),
-      webRow('TMDB recs', webSearch(query))
-    ] };
+    try { const d = await tmdb(`/${tmdbType}/${tmdbId}`); title = (d.title || d.name || '').trim(); year = (d.release_date || d.first_air_date || '').slice(0,4); } catch {}
+    const qTitle = title ? `${title}${year ? ` ${year}` : ''}` : (imdb || 'recommendations');
+    return {
+      streams: [
+        appRow('TMDB recs', `stremio:///search?search=${encodeURIComponent(qTitle)}`),
+        webRow('TMDB recs', webSearch(qTitle))
+      ]
+    };
   }
 
   return { streams: [] };
@@ -428,16 +459,17 @@ app.get('/configure', async (req, res) => {
   params.set('compat',  q.compatPopularImdb ? '1' : '0');
 
   const manifestHttp = `${base}/manifest.json?${params.toString()}`;
-  const manifestDeep = `stremio://${req.get('host')}/manifest.json?${params.toString()}`; // stremio deep link installs addon (replace scheme) — supported by clients like Vidi and Stremio. See Vidi docs. :contentReference[oaicite:0]{index=0}
+  const manifestDeep = `stremio://${req.get('host')}/manifest.json?${params.toString()}`; // install button (works on desktop/mobile that support stremio://)
+
   const webAddonsUrl = `https://web.stremio.com/#/addons/community`;
 
-  // Try to fetch a trending backdrop for the page background
+  // pick a trending backdrop
   let bgUrl = '';
   try {
     const trending = await tmdb('/trending/all/week', { page: '1' });
     const withBg = (trending.results || []).find(x => x.backdrop_path);
     if (withBg?.backdrop_path) bgUrl = `${TMDB_IMG_BG}${withBg.backdrop_path}`;
-  } catch { /* ignore */ }
+  } catch {}
 
   res.type('html').send(`<!doctype html>
 <html lang="en">
@@ -449,7 +481,6 @@ app.get('/configure', async (req, res) => {
   :root{--text:#eaf1f7;--muted:#b7c0cb;--glass:rgba(17,19,26,0.68);--glass2:rgba(20,24,36,0.55);--stroke:rgba(255,255,255,0.08);--accent:#6aa9ff;}
   *{box-sizing:border-box}
   body{margin:0;color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial;min-height:100vh;position:relative;overflow-x:hidden}
-  /* backdrop */
   body:before{
     content:"";position:fixed;inset:0;
     background:${bgUrl ? `url('${bgUrl}') center/cover no-repeat` : '#0f1115'};
@@ -536,7 +567,7 @@ app.get('/configure', async (req, res) => {
   </div>
 
 <script>
-  // keep web links in same tab
+  // same-tab for the Web link
   document.getElementById('openWeb').setAttribute('target','_self');
 
   // copy manifest
@@ -586,6 +617,3 @@ app.listen(PORT, () => {
   console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
   console.log(`Configure: http://localhost:${PORT}/configure`);
 });
-
-
-
